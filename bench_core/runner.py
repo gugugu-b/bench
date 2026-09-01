@@ -1,7 +1,6 @@
 """测试入口 - 遍历「用例 × 数据集」,执行固定并发点扫描,写汇总 CSV。"""
 
 import csv
-import glob
 import logging
 import os
 import time
@@ -11,8 +10,6 @@ from .config import (
     BEST_METRICS_HEADERS,
     DATASET_MODES,
     IO,
-    PERF_LOG_DIR,
-    PERF_MODEL_NAME,
     POINT_METRICS_HEADERS,
     SCRIPT_START_DATE,
     SCRIPT_START_TIME,
@@ -33,16 +30,6 @@ _METRIC_KEYS = [
     'mean_tpot', 'median_tpot', 'p99_tpot',
     'mean_itl', 'median_itl', 'p99_itl',
 ]
-
-
-def _move_perf_logs_to_model_dir():
-    """把 perf_log/il*.log 移动到 perf_log/<PERF_MODEL_NAME>/ 下。"""
-    perf_model_dir = os.path.join(PERF_LOG_DIR, PERF_MODEL_NAME)
-    os.makedirs(perf_model_dir, exist_ok=True)
-    for file in glob.glob(f"{PERF_LOG_DIR}/il*.log"):
-        dest = os.path.join(perf_model_dir, os.path.basename(file))
-        os.rename(file, dest)
-        logging.info(f"已将perf_log文件移动到: {dest}")
 
 
 def _write_summary_csv(summary_results):
@@ -176,7 +163,6 @@ def run_test_cases():
     total_time = int(time.time() - start_time)
     logging.info(f"测试结束，总用时: {total_time}秒")
 
-    _move_perf_logs_to_model_dir()
     _write_summary_csv(summary_results)
     _write_best_metrics_csv(summary_results)
     _write_all_perf_csv(sweeps)

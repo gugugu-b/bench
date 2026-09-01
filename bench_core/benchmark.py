@@ -17,6 +17,7 @@ from .config import (
     MAX_RETRIES,
     MODEL,
     PERF_LOG_DIR,
+    PERF_MODEL_NAME,
     PORT,
     POST_TEST_SLEEP,
     PREFIX_REPETITION_DATASET_NAME,
@@ -54,11 +55,12 @@ def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_p
                         dataset: str, metrics: dict, raw_output: str):
     """保存 perf_log 格式的日志条目(原始输出 + 提取的指标)。
 
-    文件名格式: il{input_len}_ol{output_len}_np{np}_mc{concurrency}_{dataset}.log
+    目录: perf_log/<模型名>_<dataset>/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
     """
-    os.makedirs(PERF_LOG_DIR, exist_ok=True)
-    sub_log_file = (
-        f"{PERF_LOG_DIR}/il{input_len}_ol{output_len}_np{num_prompts}_mc{concurrency}_{dataset}.log"
+    log_dir = os.path.join(PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}")
+    os.makedirs(log_dir, exist_ok=True)
+    sub_log_file = os.path.join(
+        log_dir, f"il{input_len}_ol{output_len}_np{num_prompts}_mc{concurrency}.log"
     )
     with open(sub_log_file, 'w', encoding='utf-8') as f:
         f.write(f"Input Length: {input_len}\n")
