@@ -8,7 +8,7 @@ import time
 from .benchmark import reset_bench_error_counter
 from .config import (
     BEST_METRICS_HEADERS,
-    DATASET_MODES,
+    ENABLE_DOUBLE_RUN,
     IO,
     POINT_METRICS_HEADERS,
     SCRIPT_START_DATE,
@@ -16,6 +16,7 @@ from .config import (
     SUMMARY_HEADERS,
     VERSION,
     resolve_case,
+    resolve_warmup_rounds,
 )
 from .csv_io import get_base_filename, write_to_csv
 from .metrics import reset_warnings
@@ -57,6 +58,7 @@ def _write_best_metrics_csv(summary_results):
             metrics = row.get("metrics", {})
             writer.writerow([
                 row["dataset"], row["input_len"], row["output_len"],
+                row["pc_ratio"], row["num_prefixes"],
                 row["best_concurrency"], row["best_num_prompts"],
             ] + [metrics.get(k, 0) for k in _METRIC_KEYS])
     logging.info(f"最优指标CSV已写入: {best_metrics_file}")
@@ -74,34 +76,40 @@ def _write_all_perf_csv(sweeps):
             for p in sweep.points:
                 if not p.failed:
                     writer.writerow(
-                        point_metrics_row(sweep.dataset, sweep.input_len, sweep.output_len, p)
+                        point_metrics_row(
+                            sweep.dataset, sweep.input_len, sweep.output_len, p,
+                            sweep.pc_ratio, sweep.num_prefixes,
+                        )
                     )
     logging.info(f"全场景性能汇总CSV已写入: {out_file}")
 
 
 def run_test_cases():
     """遍历「用例 × 数据集」执行固定并发点扫描,并写汇总 CSV。"""
-    logging.info(f"[{VERSION}] 开始 vllm benchmark 固定并发点扫描, 数据集: {DATASET_MODES}")
+    logging.info(f"[{VERSION}] 开始 vllm benchmark 固定并发点扫描")
     start_time = time.time()
     summary_results = []
     sweeps = []
 
     cases = [resolve_case(c) for c in IO]
-    total = len(cases) * len(DATASET_MODES)
+    total = sum(len(c["datasets"]) for c in cases)
     idx = 0
 
     for case in cases:
         input_len, output_len = case["input_len"], case["output_len"]
         ttft_max, tpot_max = case["ttft_max"], case["tpot_max"]
         ratio = case["num_prompts_ratio"]
+        pc_ratio, num_prefixes = case["pc_ratio"], case["num_prefixes"]
 
-        for dataset in DATASET_MODES:
+        for dataset in case["datasets"]:
             idx += 1
+            warmup_rounds = resolve_warmup_rounds(case["warmup_rounds"], dataset)
+            warmup_info = f"  预热轮数={warmup_rounds}" if ENABLE_DOUBLE_RUN else ""
             logging.info("=" * 72)
             logging.info(
                 f"[用例 {idx}/{total}] il={input_len} ol={output_len} ds={dataset}  "
                 f"TTFT≤{ttft_max}ms TPOT≤{tpot_max}ms  "
-                f"并发点={case['concurrency']}  请求数:并发={ratio:g}:1"
+                f"并发点={case['concurrency']}  请求数:并发={ratio:g}:1{warmup_info}"
             )
             logging.info("=" * 72)
             test_start_time = time.time()
@@ -124,6 +132,7 @@ def run_test_cases():
                 input_len, output_len, case["concurrency"],
                 dataset, ratio, ttft_max, tpot_max,
                 result_csv, sweep_csv, point_metrics_csv,
+                pc_ratio, num_prefixes, warmup_rounds,
             )
             sweeps.append(sweep)
             best = sweep.best
@@ -148,6 +157,8 @@ def run_test_cases():
                 "dataset": dataset,
                 "input_len": input_len,
                 "output_len": output_len,
+                "pc_ratio": pc_ratio,
+                "num_prefixes": num_prefixes,
                 "num_prompts_ratio": ratio,
                 "ttft_threshold": ttft_max,
                 "tpot_threshold": tpot_max,

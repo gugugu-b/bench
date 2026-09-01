@@ -21,8 +21,6 @@ from .config import (
     PORT,
     POST_TEST_SLEEP,
     PREFIX_REPETITION_DATASET_NAME,
-    PREFIX_REPETITION_NUM_PREFIXES,
-    PREFIX_REPETITION_PC_RATIO,
     RETRY_SLEEP,
     SERVED_MODEL_NAME,
     SUBPROCESS_TIMEOUT,
@@ -31,6 +29,7 @@ from .config import (
     TPOT_LABEL,
     VLLM_BENCH_HEADERS,
     compute_num_prompts,
+    prefix_context_tag,
 )
 from .csv_io import write_to_csv
 from .metrics import _extract_all_metrics, select_ttft, select_tpot
@@ -52,12 +51,13 @@ def reset_bench_error_counter():
 
 
 def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_prompts: int,
-                        dataset: str, metrics: dict, raw_output: str):
+                        dataset: str, metrics: dict, raw_output: str, context_suffix: str = ""):
     """保存 perf_log 格式的日志条目(原始输出 + 提取的指标)。
 
-    目录: perf_log/<模型名>_<dataset>/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
+    目录: perf_log/<模型名>_<dataset>{context_suffix}/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
+    文件名格式固定,供外部导入使用;同名用例(如不同 pc_ratio)靠目录后缀区分。
     """
-    log_dir = os.path.join(PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}")
+    log_dir = os.path.join(PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}{context_suffix}")
     os.makedirs(log_dir, exist_ok=True)
     sub_log_file = os.path.join(
         log_dir, f"il{input_len}_ol{output_len}_np{num_prompts}_mc{concurrency}.log"
@@ -79,7 +79,7 @@ def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_p
 
 
 def _build_bench_cmd(input_len: int, output_len: int, concurrency: int,
-                     dataset: str, num_prompts: int):
+                     dataset: str, num_prompts: int, pc_ratio: float, num_prefixes: int):
     """按数据集模式下发 random 或 prefix_repetition 命令。"""
     common = [
         "vllm", "bench", "serve",
@@ -94,16 +94,16 @@ def _build_bench_cmd(input_len: int, output_len: int, concurrency: int,
 
     if dataset == PREFIX_REPETITION_DATASET_NAME:
         # 前缀重复模式:prefix + suffix + output 三段
-        # pc_ratio 由 PREFIX_REPETITION_PC_RATIO 控制(prefix 在输入中的占比)
+        # pc_ratio 为该用例的前缀占比(不填时回退全局 PREFIX_REPETITION_PC_RATIO)
         # prefix 和 suffix 都向上取整(可能 prefix+suffix > input_len 1 个 token)
-        prefix_len = math.ceil(input_len * PREFIX_REPETITION_PC_RATIO)
-        suffix_len = math.ceil(input_len * (1 - PREFIX_REPETITION_PC_RATIO))
+        prefix_len = math.ceil(input_len * pc_ratio)
+        suffix_len = math.ceil(input_len * (1 - pc_ratio))
         return common + [
             "--dataset-name", PREFIX_REPETITION_DATASET_NAME,
             "--prefix-repetition-prefix-len", str(prefix_len),
             "--prefix-repetition-suffix-len", str(suffix_len),
             "--prefix-repetition-output-len", str(output_len),
-            "--prefix-repetition-num-prefixes", str(PREFIX_REPETITION_NUM_PREFIXES),
+            "--prefix-repetition-num-prefixes", str(num_prefixes),
             IGNORE_EOS,
         ]
 
@@ -139,7 +139,7 @@ def meet_requirements(ttft: float, tpot: float, ttft_max: float, tpot_max: float
 
 def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                   vllm_bench_result_file_name, sweep_results_file_name,
-                  ttft_max, tpot_max, is_warmup=False):
+                  ttft_max, tpot_max, is_warmup=False, context_suffix=""):
     """执行单次测试,返回 (ttft, tpot, metrics)。失败返回 (-1, -1, {})。"""
     global _bench_err_num
     stage = "预热" if is_warmup else "正式"
@@ -175,6 +175,7 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 headers=VLLM_BENCH_HEADERS,
                 input_len=input_len,
                 output_len=output_len,
+                context_suffix=context_suffix,
             )
             passed = meet_requirements(ttft, tpot, ttft_max, tpot_max)
             write_to_csv(
@@ -183,6 +184,7 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 headers=SWEEP_HEADERS,
                 input_len=input_len,
                 output_len=output_len,
+                context_suffix=context_suffix,
             )
             logging.info(
                 f"  ┗━ 并发 {concurrency} (np={num_prompts}, {dataset}): "
@@ -190,7 +192,8 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 f"throughput={m['total_token_throughput']} tok/s"
                 + ("，达标" if passed else "，未达标")
             )
-            save_perf_log_entry(input_len, output_len, concurrency, num_prompts, dataset, m, output)
+            save_perf_log_entry(input_len, output_len, concurrency, num_prompts, dataset, m, output,
+                                context_suffix)
         else:
             logging.info(
                 f"  ┗━ 预热并发 {concurrency} (np={num_prompts}, {dataset}): "
@@ -212,26 +215,32 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
 def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int,
                                ttft_max: float, tpot_max: float,
                                vllm_bench_result_file_name: str, sweep_results_file_name: str,
-                               dataset: str, num_prompts_ratio: float) -> Tuple[float, float, dict]:
-    """运行 benchmark,提取指标。ENABLE_DOUBLE_RUN 时第一次预热、第二次正式。"""
+                               dataset: str, num_prompts_ratio: float,
+                               pc_ratio: float, num_prefixes: int,
+                               warmup_rounds: int = 1) -> Tuple[float, float, dict]:
+    """运行 benchmark,提取指标。ENABLE_DOUBLE_RUN 时先用相同命令预热 warmup_rounds 轮,再正式测试。"""
     global _bench_err_num
     num_prompts = compute_num_prompts(concurrency, num_prompts_ratio)
-    cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts)
+    cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts,
+                           pc_ratio, num_prefixes)
+    context_suffix = prefix_context_tag(dataset, pc_ratio, num_prefixes)
 
     try:
         if ENABLE_DOUBLE_RUN:
-            logging.info(
-                f"开始预热测试 - 输入长度: {input_len}, 输出长度: {output_len}, "
-                f"并发数: {concurrency}, 请求数: {num_prompts}, 数据集: {dataset}"
-            )
-            warmup_ttft, warmup_tpot, _ = _execute_test(
-                cmd, input_len, output_len, concurrency, num_prompts, dataset,
-                vllm_bench_result_file_name, sweep_results_file_name,
-                ttft_max, tpot_max, is_warmup=True,
-            )
-            if warmup_ttft == -1 or warmup_tpot == -1:
-                logging.error("预热测试失败，直接返回失败")
-                return -1, -1, {}
+            for round_idx in range(1, warmup_rounds + 1):
+                logging.info(
+                    f"开始预热测试 {round_idx}/{warmup_rounds} - 输入长度: {input_len}, "
+                    f"输出长度: {output_len}, 并发数: {concurrency}, "
+                    f"请求数: {num_prompts}, 数据集: {dataset}"
+                )
+                warmup_ttft, warmup_tpot, _ = _execute_test(
+                    cmd, input_len, output_len, concurrency, num_prompts, dataset,
+                    vllm_bench_result_file_name, sweep_results_file_name,
+                    ttft_max, tpot_max, is_warmup=True, context_suffix=context_suffix,
+                )
+                if warmup_ttft == -1 or warmup_tpot == -1:
+                    logging.error("预热测试失败，直接返回失败")
+                    return -1, -1, {}
 
             logging.info(
                 f"开始正式测试 - 输入长度: {input_len}, 输出长度: {output_len}, "
@@ -240,13 +249,13 @@ def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int
             return _execute_test(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,
-                ttft_max, tpot_max, is_warmup=False,
+                ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
             )
         else:
             return _execute_test(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,
-                ttft_max, tpot_max, is_warmup=False,
+                ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
             )
     except Exception as e:
         logging.error(f"测试执行失败: {str(e)}")
@@ -260,12 +269,14 @@ def run_benchmark_with_retry_and_metrics(input_len: int, output_len: int, concur
                                          ttft_max: float, tpot_max: float,
                                          vllm_bench_result_file_name: str, sweep_results_file_name: str,
                                          dataset: str, num_prompts_ratio: float,
+                                         pc_ratio: float, num_prefixes: int,
+                                         warmup_rounds: int = 1,
                                          retries: int = MAX_RETRIES) -> Tuple[float, float, dict]:
     """运行测试,失败则重试,成功即返回。"""
     ttft, tpot, metrics = run_benchmark_with_metrics(
         input_len, output_len, concurrency, ttft_max, tpot_max,
         vllm_bench_result_file_name, sweep_results_file_name,
-        dataset, num_prompts_ratio,
+        dataset, num_prompts_ratio, pc_ratio, num_prefixes, warmup_rounds,
     )
     if ttft != -1 and tpot != -1:
         logging.info(f"测试: {TTFT_LABEL}={ttft}ms, {TPOT_LABEL}={tpot}ms, 并发={concurrency}")
@@ -276,7 +287,7 @@ def run_benchmark_with_retry_and_metrics(input_len: int, output_len: int, concur
         ttft, tpot, metrics = run_benchmark_with_metrics(
             input_len, output_len, concurrency, ttft_max, tpot_max,
             vllm_bench_result_file_name, sweep_results_file_name,
-            dataset, num_prompts_ratio,
+            dataset, num_prompts_ratio, pc_ratio, num_prefixes, warmup_rounds,
         )
         if ttft != -1 and tpot != -1:
             logging.info(f"第 {attempt + 1} 次重试: {TTFT_LABEL}={ttft}ms, {TPOT_LABEL}={tpot}ms, 并发={concurrency}")

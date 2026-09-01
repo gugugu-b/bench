@@ -16,6 +16,7 @@ from .config import (
     TTFT_LABEL,
     TPOT_LABEL,
     compute_num_prompts,
+    prefix_context_tag,
 )
 from .csv_io import write_to_csv
 
@@ -47,6 +48,8 @@ class SweepResult:
     output_len: int
     dataset: str
     num_prompts_ratio: float
+    pc_ratio: float
+    num_prefixes: int
     ttft_max: float
     tpot_max: float
     points: List[PointResult] = field(default_factory=list)
@@ -66,11 +69,12 @@ class SweepResult:
         return len(self.passed_points)
 
 
-def point_metrics_row(dataset: str, input_len: int, output_len: int, point: PointResult) -> list:
+def point_metrics_row(dataset: str, input_len: int, output_len: int, point: PointResult,
+                      pc_ratio: float, num_prefixes: int) -> list:
     """单个并发点的 point_metrics 表行(含两个单并发归一化吞吐列)。"""
     m = point.metrics
     return [
-        dataset, input_len, output_len, point.concurrency,
+        dataset, input_len, output_len, point.concurrency, pc_ratio, num_prefixes,
         m['mean_ttft'], m['mean_tpot'],
         m['output_token_throughput'], m['total_token_throughput'],
         m['benchmark_duration'],
@@ -85,7 +89,9 @@ def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: Lis
                           ttft_max: float, tpot_max: float,
                           vllm_bench_result_file_name: str,
                           sweep_results_file_name: str,
-                          point_metrics_file_name: str) -> SweepResult:
+                          point_metrics_file_name: str,
+                          pc_ratio: float, num_prefixes: int,
+                          warmup_rounds: int = 1) -> SweepResult:
     """按给定并发列表逐点测试,返回 SweepResult。
 
     concurrency_list 里重复的值只测一次(结果复用缓存)。
@@ -96,16 +102,19 @@ def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: Lis
         output_len=output_len,
         dataset=dataset,
         num_prompts_ratio=num_prompts_ratio,
+        pc_ratio=pc_ratio,
+        num_prefixes=num_prefixes,
         ttft_max=ttft_max,
         tpot_max=tpot_max,
     )
     # 去重并保持配置里的顺序
     ordered = list(dict.fromkeys(int(c) for c in concurrency_list))
     total_points = len(ordered)
+    context_suffix = prefix_context_tag(dataset, pc_ratio, num_prefixes)
 
     logging.info(
         f"并发点扫描: {ordered} (共 {total_points} 点), 请求数:并发 = {num_prompts_ratio:g}:1, "
-        f"数据集={dataset}, 阈值: {TTFT_LABEL}≤{ttft_max}ms / {TPOT_LABEL}≤{tpot_max}ms"
+        f"数据集={dataset}{context_suffix}, 阈值: {TTFT_LABEL}≤{ttft_max}ms / {TPOT_LABEL}≤{tpot_max}ms"
     )
 
     for idx, concurrency in enumerate(ordered, 1):
@@ -115,7 +124,7 @@ def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: Lis
         ttft, tpot, metrics = run_benchmark_with_retry_and_metrics(
             input_len, output_len, concurrency, ttft_max, tpot_max,
             vllm_bench_result_file_name, sweep_results_file_name,
-            dataset, num_prompts_ratio,
+            dataset, num_prompts_ratio, pc_ratio, num_prefixes, warmup_rounds,
         )
 
         failed = ttft == -1 or tpot == -1
@@ -132,11 +141,12 @@ def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: Lis
 
         if not failed:
             write_to_csv(
-                point_metrics_row(dataset, input_len, output_len, point),
+                point_metrics_row(dataset, input_len, output_len, point, pc_ratio, num_prefixes),
                 point_metrics_file_name,
                 headers=POINT_METRICS_HEADERS,
                 input_len=input_len,
                 output_len=output_len,
+                context_suffix=context_suffix,
             )
 
         elapsed = int(time.time() - point_start)
@@ -168,7 +178,8 @@ def _log_sweep_summary(result: SweepResult):
     """扫描结束后打印该组合的横向对比表。"""
     logging.info("-" * 72)
     logging.info(
-        f"扫描汇总 il={result.input_len} ol={result.output_len} ds={result.dataset} "
+        f"扫描汇总 il={result.input_len} ol={result.output_len} "
+        f"ds={result.dataset}{prefix_context_tag(result.dataset, result.pc_ratio, result.num_prefixes)} "
         f"阈值: TTFT≤{result.ttft_max}ms TPOT≤{result.tpot_max}ms"
     )
     header = f"{'并发':>6} | {'请求数':>7} | {TTFT_LABEL:>12} | {TPOT_LABEL:>12} | {'总吞吐(tok/s)':>14} | 达标"
