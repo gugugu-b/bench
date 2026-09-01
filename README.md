@@ -79,18 +79,28 @@ python run.py
 ```
 bench/
 ├── best_metrics_YYYYMMDD_HHMMSS.csv          # 最优并发点的全量指标（每用例×数据集一行）
+├── import_all_perf.csv                       # 全场景汇总：所有场景的逐并发点关键性能指标（每次运行重写）
 ├── log/
 │   └── YYYYMMDD/                             # 按运行日期归档
 │       ├── summary_YYYYMMDD_HHMMSS.csv       # 汇总：最优并发 / 阈值 / 达标点数等
 │       └── context_<il>x<ol>/                # 按「输入长度×输出长度」分目录
 │           ├── vllm_bench_result-*.csv       # 每个并发点的全部提取指标（追加写）
-│           └── sweep_results-*.csv           # 每个并发点一行：ttft / tpot / passed
+│           ├── sweep_results-*.csv           # 每个并发点一行：ttft / tpot / passed
+│           └── point_metrics-*.csv           # 每个并发点一行：关键性能指标（见下）
 └── perf_log/
     └── <模型名>/
         └── il*_ol*_np*_mc*_<dataset>.log     # 原始子进程输出 + 提取的指标
 ```
 
 - `sweep_results` 的 `passed=1` 表示该点 TTFT 与 TPOT 同时在阈值内；
+- `point_metrics` 每个成功并发点一行，列为：`mean_ttft` / `mean_tpot`（平均延迟）、
+  `output_token_throughput`（生成输出吞吐）、`total_token_throughput`（总吞吐）、
+  `benchmark_duration`（总耗时，秒），以及两个单并发归一化指标：
+  `output_throughput_per_concurrency`（单并发输出吞吐 = 生成输出吞吐 ÷ 并发数）、
+  `decode_throughput_per_concurrency`（单并发 decode 吞吐 = 1000 ÷ 平均 TPOT，
+  即单条请求流在 decode 阶段的 token 速率）；
+- `bench/import_all_perf.csv`：上述 point_metrics 的全场景汇总表（列完全相同），
+  收录本次运行所有「用例 × 数据集」组合的每个成功并发点，运行结束整体重写；
 - `summary` 的 `points_passed / points_total` 为该组合的达标点数与总点数。
 
 ---

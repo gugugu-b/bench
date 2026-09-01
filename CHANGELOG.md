@@ -22,6 +22,11 @@
 - **结果落盘**（详见 README「输出说明」）：
   - `bench/log/<日期>/context_<il>x<ol>/vllm_bench_result-*.csv`：每个并发点的全量指标（追加写）；
   - `bench/log/<日期>/context_<il>x<ol>/sweep_results-*.csv`：每个并发点一行（ttft / tpot / passed）；
+  - `bench/log/<日期>/context_<il>x<ol>/point_metrics-*.csv`：每个成功并发点一行的关键性能指标
+    （平均 TTFT/TPOT、生成输出吞吐、总吞吐、总耗时、单并发输出吞吐 = 生成输出吞吐 ÷ 并发数、
+    单并发 decode 吞吐 = 1000 ÷ 平均 TPOT）；
+  - `bench/import_all_perf.csv`：全场景汇总表，收录本次运行所有「用例 × 数据集」组合的
+    逐并发点关键性能指标（列与 point_metrics 相同），运行结束整体重写；
   - `bench/log/<日期>/summary_*.csv`：每个「用例 × 数据集」一行的汇总；
   - `bench/best_metrics_*.csv`：最优并发点的完整指标；
   - `bench/perf_log/<模型名>/*.log`：原始子进程输出 + 提取的指标。
