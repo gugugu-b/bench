@@ -11,11 +11,13 @@ from typing import List, Optional
 
 from .benchmark import meet_requirements, run_benchmark_with_retry_and_metrics
 from .config import (
+    POINT_METRICS_HEADERS,
     STOP_ON_BREACH,
     TTFT_LABEL,
     TPOT_LABEL,
     compute_num_prompts,
 )
+from .csv_io import write_to_csv
 
 
 @dataclass
@@ -64,11 +66,26 @@ class SweepResult:
         return len(self.passed_points)
 
 
+def point_metrics_row(dataset: str, input_len: int, output_len: int, point: PointResult) -> list:
+    """单个并发点的 point_metrics 表行(含两个单并发归一化吞吐列)。"""
+    m = point.metrics
+    return [
+        dataset, input_len, output_len, point.concurrency,
+        m['mean_ttft'], m['mean_tpot'],
+        m['output_token_throughput'], m['total_token_throughput'],
+        m['benchmark_duration'],
+        m['output_token_throughput'] / point.concurrency,
+        # 单并发 decode 吞吐 = 1000/平均TPOT(ms),单条请求流的 decode 速率
+        (1000 / m['mean_tpot']) if m['mean_tpot'] > 0 else 0.0,
+    ]
+
+
 def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: List[int],
                           dataset: str, num_prompts_ratio: float,
                           ttft_max: float, tpot_max: float,
                           vllm_bench_result_file_name: str,
-                          sweep_results_file_name: str) -> SweepResult:
+                          sweep_results_file_name: str,
+                          point_metrics_file_name: str) -> SweepResult:
     """按给定并发列表逐点测试,返回 SweepResult。
 
     concurrency_list 里重复的值只测一次(结果复用缓存)。
@@ -112,6 +129,15 @@ def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: Lis
             failed=failed,
         )
         result.points.append(point)
+
+        if not failed:
+            write_to_csv(
+                point_metrics_row(dataset, input_len, output_len, point),
+                point_metrics_file_name,
+                headers=POINT_METRICS_HEADERS,
+                input_len=input_len,
+                output_len=output_len,
+            )
 
         elapsed = int(time.time() - point_start)
         if failed:

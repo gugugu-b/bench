@@ -138,6 +138,16 @@ SWEEP_HEADERS = [
     "ttft", "tpot", "passed",
 ]
 
+# 每个成功并发点一行:关键性能指标 + 单并发归一化吞吐
+# output_throughput_per_concurrency = output_token_throughput / concurrency
+# decode_throughput_per_concurrency = 1000 / mean_tpot,即单条请求流的 decode 速率(tok/s)
+POINT_METRICS_HEADERS = [
+    "dataset", "input_len", "output_len", "concurrency",
+    "mean_ttft", "mean_tpot",
+    "output_token_throughput", "total_token_throughput", "benchmark_duration",
+    "output_throughput_per_concurrency", "decode_throughput_per_concurrency",
+]
+
 SUMMARY_HEADERS = [
     "dataset", "input_len", "output_len", "num_prompts_ratio",
     "ttft_threshold", "tpot_threshold",

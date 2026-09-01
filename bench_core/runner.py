@@ -13,6 +13,7 @@ from .config import (
     IO,
     PERF_LOG_DIR,
     PERF_MODEL_NAME,
+    POINT_METRICS_HEADERS,
     SCRIPT_START_DATE,
     SCRIPT_START_TIME,
     SUMMARY_HEADERS,
@@ -21,7 +22,7 @@ from .config import (
 )
 from .csv_io import get_base_filename, write_to_csv
 from .metrics import reset_warnings
-from .sweep import run_concurrency_sweep
+from .sweep import point_metrics_row, run_concurrency_sweep
 
 
 _METRIC_KEYS = [
@@ -74,11 +75,29 @@ def _write_best_metrics_csv(summary_results):
     logging.info(f"最优指标CSV已写入: {best_metrics_file}")
 
 
+def _write_all_perf_csv(sweeps):
+    """把本次运行所有场景的逐并发点关键性能指标汇总成一张表,写到 bench/import_all_perf.csv。"""
+    out_dir = os.path.join(os.getcwd(), "bench")
+    os.makedirs(out_dir, exist_ok=True)
+    out_file = os.path.join(out_dir, "import_all_perf.csv")
+    with open(out_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(POINT_METRICS_HEADERS)
+        for sweep in sweeps:
+            for p in sweep.points:
+                if not p.failed:
+                    writer.writerow(
+                        point_metrics_row(sweep.dataset, sweep.input_len, sweep.output_len, p)
+                    )
+    logging.info(f"全场景性能汇总CSV已写入: {out_file}")
+
+
 def run_test_cases():
     """遍历「用例 × 数据集」执行固定并发点扫描,并写汇总 CSV。"""
     logging.info(f"[{VERSION}] 开始 vllm benchmark 固定并发点扫描, 数据集: {DATASET_MODES}")
     start_time = time.time()
     summary_results = []
+    sweeps = []
 
     cases = [resolve_case(c) for c in IO]
     total = len(cases) * len(DATASET_MODES)
@@ -110,12 +129,16 @@ def run_test_cases():
             sweep_csv = get_base_filename(
                 "sweep_results", input_len, output_len, ttft_max, tpot_max, dataset
             )
+            point_metrics_csv = get_base_filename(
+                "point_metrics", input_len, output_len, ttft_max, tpot_max, dataset
+            )
 
             sweep = run_concurrency_sweep(
                 input_len, output_len, case["concurrency"],
                 dataset, ratio, ttft_max, tpot_max,
-                result_csv, sweep_csv,
+                result_csv, sweep_csv, point_metrics_csv,
             )
+            sweeps.append(sweep)
             best = sweep.best
 
             test_time = int(time.time() - test_start_time)
@@ -156,3 +179,4 @@ def run_test_cases():
     _move_perf_logs_to_model_dir()
     _write_summary_csv(summary_results)
     _write_best_metrics_csv(summary_results)
+    _write_all_perf_csv(sweeps)
