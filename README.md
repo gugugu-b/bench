@@ -88,8 +88,8 @@ bench/
 │           ├── sweep_results-*.csv           # 每个并发点一行：ttft / tpot / passed
 │           └── point_metrics-*.csv           # 每个并发点一行：关键性能指标（见下）
 └── perf_log/
-    └── <模型名>/
-        └── il*_ol*_np*_mc*_<dataset>.log     # 原始子进程输出 + 提取的指标
+    └── <模型名>_<dataset>/
+        └── il*_ol*_np*_mc*.log               # 原始子进程输出 + 提取的指标
 ```
 
 - `sweep_results` 的 `passed=1` 表示该点 TTFT 与 TPOT 同时在阈值内；

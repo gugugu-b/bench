@@ -29,7 +29,8 @@
     逐并发点关键性能指标（列与 point_metrics 相同），运行结束整体重写；
   - `bench/log/<日期>/summary_*.csv`：每个「用例 × 数据集」一行的汇总；
   - `bench/best_metrics_*.csv`：最优并发点的完整指标；
-  - `bench/perf_log/<模型名>/*.log`：原始子进程输出 + 提取的指标。
+  - `bench/perf_log/<模型名>_<dataset>/*.log`：原始子进程输出 + 提取的指标
+    （文件名 `il*_ol*_np*_mc*.log`，数据集并入目录名）；
 - 控制台实时输出每点结果，扫描结束打印横向对比表与结论。
 
 ### 约定
