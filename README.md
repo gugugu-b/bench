@@ -47,14 +47,15 @@ python run.py
 | 配置项 | 含义 | 默认值 |
 |---|---|---|
 | `IO` | 测试用例列表，字段见下表 | 见文件 |
-| `DATASET_MODES` | 数据集列表，支持 `random` / `prefix_repetition` | 两者都跑 |
+| `DATASET_MODES` | 全局默认数据集列表，支持 `random` / `prefix_repetition`；用例可用 `datasets` 字段单独指定 | 两者都跑 |
 | `NUM_PROMPTS_RATIO` | 全局「请求数 : 并发数」比例 | `2` |
 | `STOP_ON_BREACH` | 某点未达标时是否提前结束本组合剩余并发点 | `False` |
 | `DEFAULT_TTFT_MAX` / `DEFAULT_TPOT_MAX` | 全局阈值默认值 (ms) | `3000` / `100` |
 | `TTFT_LABEL` / `TPOT_LABEL` | 判定用指标，可选 Mean / Median / P99 | `Mean` |
 | `HOST` / `PORT` / `SERVED_MODEL_NAME` / `MODEL` | 被测 vLLM 服务信息 | 见文件 |
-| `PREFIX_REPETITION_PC_RATIO` 等 | 前缀重复数据集参数（前缀占比 / 前缀数） | `0.9` / `1` |
-| `ENABLE_DOUBLE_RUN` | 是否先预热一次、第二次计为正式结果 | `True` |
+| `PREFIX_REPETITION_PC_RATIO` 等 | 前缀重复数据集全局默认参数（前缀占比 / 前缀数），可在 `IO` 用例里用 `pc_ratio` / `num_prefixes` 按用例覆盖 | `0.9` / `1` |
+| `ENABLE_DOUBLE_RUN` | 是否开启预热：正式测试前先用相同命令预热若干轮 | `True` |
+| `WARMUP_ROUNDS` | 预热轮数（`ENABLE_DOUBLE_RUN=True` 时生效）；int 为所有数据集统一轮数，dict 按数据集指定（如 `{"random": 1, "prefix_repetition": 4}`）；用例级 `warmup_rounds` 可覆盖 | `{"random": 1, "prefix_repetition": 4}` |
 | `MAX_RETRIES` / `BENCH_MAX_ERRORS` | 失败重试次数 / 连续失败上限 | `2` / `3` |
 | `SUBPROCESS_TIMEOUT` | 单次子进程超时（秒） | `3600` |
 | `PERF_LOG_DIR` | perf_log 输出目录 | `./bench/perf_log` |
@@ -67,6 +68,10 @@ python run.py
 | `concurrency` | 是 | 该组合要跑的并发点列表（写单个 int 等价于 `[int]`） |
 | `num_prompts_ratio` | 否 | 「请求数 : 并发数」比例，缺省用全局 `NUM_PROMPTS_RATIO` |
 | `ttft_max` / `tpot_max` | 否 | 该用例的阈值 (ms)，缺省用全局默认值 |
+| `pc_ratio` | 否 | prefix_repetition 模式下 prefix 在输入长度中的占比，缺省用全局 `PREFIX_REPETITION_PC_RATIO`；支持输入输出相同、仅占比不同的多组用例 |
+| `num_prefixes` | 否 | prefix_repetition 模式的前缀数，缺省用全局 `PREFIX_REPETITION_NUM_PREFIXES` |
+| `datasets` | 否 | 该用例要跑的数据集列表，缺省用全局 `DATASET_MODES`；只需对比前缀占比等单数据集场景可避免重复跑 random |
+| `warmup_rounds` | 否 | 预热轮数：int（该用例统一）或 `{dataset: 轮数}`（按数据集），缺省用全局 `WARMUP_ROUNDS`；填 0 表示该场景不预热 |
 
 请求数 = `ceil(并发 × 比例)`；比例 ≥ 1 时保证不少于并发数。
 
@@ -83,17 +88,20 @@ bench/
 ├── log/
 │   └── YYYYMMDD/                             # 按运行日期归档
 │       ├── summary_YYYYMMDD_HHMMSS.csv       # 汇总：最优并发 / 阈值 / 达标点数等
-│       └── context_<il>x<ol>/                # 按「输入长度×输出长度」分目录
+│       └── context_<il>x<ol>/                # 按场景分目录；prefix_repetition 数据集目录名
+│           │                                 #   追加 _pc{占比}_np{前缀数} 后缀（如 context_1024x1024_pc0.9_np1）
 │           ├── vllm_bench_result-*.csv       # 每个并发点的全部提取指标（追加写）
 │           ├── sweep_results-*.csv           # 每个并发点一行：ttft / tpot / passed
 │           └── point_metrics-*.csv           # 每个并发点一行：关键性能指标（见下）
 └── perf_log/
-    └── <模型名>_<dataset>/
-        └── il*_ol*_np*_mc*.log               # 原始子进程输出 + 提取的指标
+    └── <模型名>_<dataset>[_pc{占比}_np{前缀数}]/
+        └── il*_ol*_np*_mc*.log               # 原始子进程输出 + 提取的指标（文件名格式固定，供导入使用）
 ```
 
 - `sweep_results` 的 `passed=1` 表示该点 TTFT 与 TPOT 同时在阈值内；
-- `point_metrics` 每个成功并发点一行，列为：`mean_ttft` / `mean_tpot`（平均延迟）、
+- `point_metrics` 每个成功并发点一行，标识列为 `dataset` / `input_len` / `output_len` /
+  `concurrency` / `pc_ratio` / `num_prefixes`（前缀参数，用于区分输入输出相同但前缀配置不同的用例），
+  指标列为：`mean_ttft` / `mean_tpot`（平均延迟）、
   `output_token_throughput`（生成输出吞吐）、`total_token_throughput`（总吞吐）、
   `benchmark_duration`（总耗时，秒），以及两个单并发归一化指标：
   `output_throughput_per_concurrency`（单并发输出吞吐 = 生成输出吞吐 ÷ 并发数）、
@@ -101,7 +109,8 @@ bench/
   即单条请求流在 decode 阶段的 token 速率）；
 - `bench/import_all_perf.csv`：上述 point_metrics 的全场景汇总表（列完全相同），
   收录本次运行所有「用例 × 数据集」组合的每个成功并发点，运行结束整体重写；
-- `summary` 的 `points_passed / points_total` 为该组合的达标点数与总点数。
+- `summary` 与 `best_metrics` 同样带 `pc_ratio` / `num_prefixes` 标识列；
+  `summary` 的 `points_passed / points_total` 为该组合的达标点数与总点数。
 
 ---
 

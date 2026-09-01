@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.1.0
+
+- **按用例自定义前缀重复参数**：`IO` 用例新增可选字段 `pc_ratio`（prefix 在输入长度中的占比）
+  与 `num_prefixes`（前缀数），缺省回退全局 `PREFIX_REPETITION_PC_RATIO` / `PREFIX_REPETITION_NUM_PREFIXES`；
+  支持输入输出完全相同、仅前缀参数不同的多组用例（默认配置即含 1024×1024 的 pc 10% / 90% 两组）。
+- **预热轮数可配**：`ENABLE_DOUBLE_RUN=True` 时，正式测试前用完全相同的命令先预热
+  `WARMUP_ROUNDS` 轮。全局 `WARMUP_ROUNDS` 可为 int（所有数据集统一轮数）或 dict
+  （按数据集指定，如 `{"random": 1, "prefix_repetition": 4}`，默认即此值）；
+  用例级 `warmup_rounds` 字段可覆盖（写法相同，填 0 表示该场景不预热）。
+- **数据集按用例指定**：`IO` 用例新增可选 `datasets` 字段，指定该用例要跑的数据集列表，
+  缺省回退全局 `DATASET_MODES`。
+- **目录与表格区分前缀参数**：prefix_repetition 数据集的上下文目录由 `context_<il>x<ol>`
+  改为 `context_<il>x<ol>_pc{占比}_np{前缀数}`（random 数据集目录名不变）；
+  perf_log 目录由 `<模型名>_<dataset>` 改为 `<模型名>_<dataset>_pc{占比}_np{前缀数}`
+  （文件名 `il*_ol*_np*_mc*.log` 格式固定不变，供外部导入；避免输入输出相同、
+  仅前缀参数不同的用例日志互相覆盖）；
+  `point_metrics` / `import_all_perf` / `summary` / `best_metrics` 均新增
+  `pc_ratio`、`num_prefixes` 标识列。
+- 注：输入输出相同的多组用例若都跑 random 会重复执行并追加到同一文件；
+  只想对比前缀占比时，给这些用例加 `"datasets": ["prefix_repetition"]` 即可。
+
 ## v1.0.0 - 首个正式版本
 
 > 此前项目以 v1.x / v2.x 内部迭代（自适应并发搜索、包更名为 `bench_core`、移除 SLO 命名等），
