@@ -255,6 +255,11 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
     if metrics:
         cache_rate, spec_rate = compute_metrics_rates(before, _scrape_metrics_snapshot())
         metrics['prefix_cache_hit_rate'] = cache_rate
+        # fork 版 bench serve 直接打印的本次测试接受率优先于 /metrics 差值
+        # (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径)
+        bench_rate = metrics.get('spec_accept_rate', float('inf'))
+        if math.isfinite(bench_rate):
+            spec_rate = round(bench_rate, 2)
         metrics['spec_decode_accept_rate'] = spec_rate
     return ttft, tpot, metrics
 

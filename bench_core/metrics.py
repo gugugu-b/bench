@@ -116,11 +116,32 @@ def scrape_prometheus_metrics(host: str, port: int, path: str = "/metrics",
     return values
 
 
-def _sum_series(snapshot: dict, key: str):
-    """计数器语义聚合: 同名多序列(如多 dp_rank)求和;指标缺失返回 None。"""
-    if not snapshot or key not in snapshot:
+def _resolve_counter_key(snapshot: dict, key: str):
+    """计数器样本名解析。
+
+    Prometheus 文本导出会给计数器样本追加 `_total` 后缀
+    (如 vllm:prefix_cache_queries → vllm:prefix_cache_queries_total),
+    精确名未命中时自动尝试 `<key>_total`;均未命中返回 None。
+    """
+    if not snapshot:
         return None
-    return sum(v for _, v in snapshot[key])
+    if key in snapshot:
+        return key
+    total_key = f"{key}_total"
+    if total_key in snapshot:
+        return total_key
+    return None
+
+
+def _sum_series(snapshot: dict, key: str):
+    """计数器语义聚合: 同名多序列(如多 dp_rank)求和;指标缺失返回 None。
+
+    key 可传无后缀的计数器族名,内部自动解析 `_total` 样本名。
+    """
+    actual = _resolve_counter_key(snapshot, key)
+    if actual is None:
+        return None
+    return sum(v for _, v in snapshot[actual])
 
 
 def _mean_series(snapshot: dict, key: str):
@@ -154,26 +175,34 @@ def _detect_backend(snapshot: dict) -> str:
 
 
 def _compute_vllm_rates(before: dict, after: dict):
-    """vLLM: query 级 prefix cache 命中率与 token 级投机采样接受率,均为计数器差值(多序列求和)。"""
+    """vLLM: prefix cache 命中率与投机采样接受率,均为计数器差值(多序列求和)。
+
+    计数器样本名可能带 `_total` 后缀(取决于 vLLM 版本/注册方式),自动解析。
+    """
     if not before or not after:
         return "", ""
     cache_rate = ""
     for hits_key, queries_key in _PREFIX_CACHE_PAIRS:
-        if hits_key in after and queries_key in after:
-            delta_queries = (_sum_series(after, queries_key)
-                             - (_sum_series(before, queries_key) or 0.0))
-            if delta_queries > 0:
-                delta_hits = (_sum_series(after, hits_key)
-                              - (_sum_series(before, hits_key) or 0.0))
-                cache_rate = round(delta_hits / delta_queries * 100, 2)
-            break
+        queries_actual = _resolve_counter_key(after, queries_key)
+        hits_actual = _resolve_counter_key(after, hits_key)
+        if queries_actual is None or hits_actual is None:
+            continue
+        delta_queries = (_sum_series(after, queries_actual)
+                         - (_sum_series(before, queries_actual) or 0.0))
+        if delta_queries > 0:
+            delta_hits = (_sum_series(after, hits_actual)
+                          - (_sum_series(before, hits_actual) or 0.0))
+            cache_rate = round(delta_hits / delta_queries * 100, 2)
+        break
     spec_rate = ""
-    if _SPEC_DECODE_ACCEPTED_KEY in after and _SPEC_DECODE_DRAFT_KEY in after:
-        delta_draft = (_sum_series(after, _SPEC_DECODE_DRAFT_KEY)
-                       - (_sum_series(before, _SPEC_DECODE_DRAFT_KEY) or 0.0))
+    accepted_actual = _resolve_counter_key(after, _SPEC_DECODE_ACCEPTED_KEY)
+    draft_actual = _resolve_counter_key(after, _SPEC_DECODE_DRAFT_KEY)
+    if accepted_actual is not None and draft_actual is not None:
+        delta_draft = (_sum_series(after, draft_actual)
+                       - (_sum_series(before, draft_actual) or 0.0))
         if delta_draft > 0:
-            delta_accepted = (_sum_series(after, _SPEC_DECODE_ACCEPTED_KEY)
-                              - (_sum_series(before, _SPEC_DECODE_ACCEPTED_KEY) or 0.0))
+            delta_accepted = (_sum_series(after, accepted_actual)
+                              - (_sum_series(before, accepted_actual) or 0.0))
             spec_rate = round(delta_accepted / delta_draft * 100, 2)
     return cache_rate, spec_rate
 

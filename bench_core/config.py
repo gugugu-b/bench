@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.2.0"
+VERSION = "v1.2.1"
 
 # 数据集模式: 支持 "random" / "prefix_repetition",可填多个,按顺序各跑一遍
 # 用例可用 datasets 字段指定自己要跑的数据集列表,不填的用例用这里的全局默认
@@ -257,6 +257,8 @@ METRIC_PATTERNS = {
     'mean_itl': r"[Mm]ean\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     'median_itl': r"[Mm]edian\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     'p99_itl': r"P99\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
+    # 部分厂商 fork 的 vllm bench serve 在结果里直接打印本次测试的投机采样接受率(百分数)
+    'spec_accept_rate': r"[Aa]cceptance\s+[Rr]ate\s*\(%\)\s*:\s*(\d+(?:\.\d+)?)",
 }
 
 INT_METRIC_KEYS = frozenset({'successful_requests', 'total_input_tokens', 'total_generated_tokens'})
