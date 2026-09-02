@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.1.0"
+VERSION = "v1.2.0"
 
 # 数据集模式: 支持 "random" / "prefix_repetition",可填多个,按顺序各跑一遍
 # 用例可用 datasets 字段指定自己要跑的数据集列表,不填的用例用这里的全局默认
@@ -49,6 +49,7 @@ IO = [
         "ttft_max": 3000,
         "tpot_max": 100,
         "pc_ratio": 0.1,          # prefix 占输入长度的 10%
+        "datasets": ["prefix_repetition"],
     },
     {
         "input_len": 1024,
@@ -58,6 +59,7 @@ IO = [
         "ttft_max": 3000,
         "tpot_max": 100,
         "pc_ratio": 0.9,          # prefix 占输入长度的 90%
+        "datasets": ["prefix_repetition"],
     },
     {
         "input_len": 8192,
@@ -66,6 +68,7 @@ IO = [
         "num_prompts_ratio": 2,   # 请求数 = 并发 × 2
         "ttft_max": 3000,
         "tpot_max": 100,
+        "datasets": ["random", "prefix_repetition"],
     },
 ]
 
@@ -104,6 +107,17 @@ def prefix_context_tag(dataset: str, pc_ratio: float, num_prefixes: int) -> str:
     if dataset != PREFIX_REPETITION_DATASET_NAME:
         return ""
     return f"_pc{pc_ratio:g}_np{num_prefixes}"
+
+
+def dataset_prefix_fields(dataset: str, pc_ratio: float, num_prefixes: int):
+    """前缀参数在 CSV 标识列中的取值。
+
+    仅 prefix_repetition 数据集有意义,返回原值;random 等其他数据集返回空串,
+    避免把「未参与测试的回退默认值」误记为有效配置。
+    """
+    if dataset != PREFIX_REPETITION_DATASET_NAME:
+        return "", ""
+    return pc_ratio, num_prefixes
 
 
 def resolve_warmup_rounds(case_rounds, dataset: str) -> int:
@@ -165,6 +179,13 @@ WARMUP_ROUNDS = {"random": 1, "prefix_repetition": 4}
 # 运行时参数
 SUBPROCESS_TIMEOUT = 3600       # vllm bench serve 子进程超时(秒)
 POST_TEST_SLEEP = 2             # 单次测试后等待(秒)
+
+# 从被测服务的 Prometheus /metrics 抓取指标(vLLM API server 默认在同一 host:port 暴露),
+# 用正式测试前后快照的差值计算 prefix cache 命中率与投机采样接受率;
+# 抓取失败只告警一次,不影响测试,对应列留空
+ENABLE_METRICS_SCRAPE = True    # 是否抓取 /metrics
+METRICS_SCRAPE_PATH = "/metrics"  # 抓取路径
+METRICS_SCRAPE_TIMEOUT = 5      # 抓取超时(秒)
 RETRY_SLEEP = 2                 # 失败重试间隔(秒)
 
 # perf_log 相关
@@ -197,11 +218,13 @@ SWEEP_HEADERS = [
 # pc_ratio / num_prefixes 为该用例的前缀重复参数(random 数据集下不参与命令,仅作标识)
 # output_throughput_per_concurrency = output_token_throughput / concurrency
 # decode_throughput_per_concurrency = 1000 / mean_tpot,即单条请求流的 decode 速率(tok/s)
+# prefix_cache_hit_rate / spec_decode_accept_rate 来自 /metrics 正式测试前后快照差值(百分数,不可用为空)
 POINT_METRICS_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "pc_ratio", "num_prefixes",
     "mean_ttft", "mean_tpot",
     "output_token_throughput", "total_token_throughput", "benchmark_duration",
     "output_throughput_per_concurrency", "decode_throughput_per_concurrency",
+    "prefix_cache_hit_rate", "spec_decode_accept_rate",
 ]
 
 SUMMARY_HEADERS = [

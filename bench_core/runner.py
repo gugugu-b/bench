@@ -15,6 +15,7 @@ from .config import (
     SCRIPT_START_TIME,
     SUMMARY_HEADERS,
     VERSION,
+    dataset_prefix_fields,
     resolve_case,
     resolve_warmup_rounds,
 )
@@ -103,6 +104,8 @@ def run_test_cases():
 
         for dataset in case["datasets"]:
             idx += 1
+            # CSV 标识列取值:仅 prefix_repetition 记录前缀参数,random 等留空
+            ds_pc, ds_np = dataset_prefix_fields(dataset, pc_ratio, num_prefixes)
             warmup_rounds = resolve_warmup_rounds(case["warmup_rounds"], dataset)
             warmup_info = f"  预热轮数={warmup_rounds}" if ENABLE_DOUBLE_RUN else ""
             logging.info("=" * 72)
@@ -157,8 +160,8 @@ def run_test_cases():
                 "dataset": dataset,
                 "input_len": input_len,
                 "output_len": output_len,
-                "pc_ratio": pc_ratio,
-                "num_prefixes": num_prefixes,
+                "pc_ratio": ds_pc,
+                "num_prefixes": ds_np,
                 "num_prompts_ratio": ratio,
                 "ttft_threshold": ttft_max,
                 "tpot_threshold": tpot_max,

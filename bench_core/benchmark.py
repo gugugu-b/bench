@@ -12,9 +12,12 @@ from .config import (
     BENCH_MAX_ERRORS,
     DATASET_NAME,
     ENABLE_DOUBLE_RUN,
+    ENABLE_METRICS_SCRAPE,
     HOST,
     IGNORE_EOS,
     MAX_RETRIES,
+    METRICS_SCRAPE_PATH,
+    METRICS_SCRAPE_TIMEOUT,
     MODEL,
     PERF_LOG_DIR,
     PERF_MODEL_NAME,
@@ -32,7 +35,13 @@ from .config import (
     prefix_context_tag,
 )
 from .csv_io import write_to_csv
-from .metrics import _extract_all_metrics, select_ttft, select_tpot
+from .metrics import (
+    _extract_all_metrics,
+    compute_metrics_rates,
+    scrape_prometheus_metrics,
+    select_ttft,
+    select_tpot,
+)
 
 
 class BenchmarkError(Exception):
@@ -42,6 +51,27 @@ class BenchmarkError(Exception):
 
 # 子进程连续失败计数,达到 BENCH_MAX_ERRORS 抛 BenchmarkError
 _bench_err_num = 0
+
+# /metrics 抓取失败是否已告警过(只告警一次,避免每个测试点刷屏)
+_metrics_scrape_warned = False
+
+
+def _scrape_metrics_snapshot():
+    """抓取一次 /metrics 快照;开关关闭或抓取失败返回 None(失败只告警一次)。"""
+    global _metrics_scrape_warned
+    if not ENABLE_METRICS_SCRAPE:
+        return None
+    try:
+        return scrape_prometheus_metrics(HOST, PORT, METRICS_SCRAPE_PATH, METRICS_SCRAPE_TIMEOUT)
+    except Exception as e:
+        if not _metrics_scrape_warned:
+            logging.warning(
+                f"抓取 http://{HOST}:{PORT}{METRICS_SCRAPE_PATH} 失败: {e}; "
+                "prefix cache 命中率与投机采样接受率将留空"
+                "(服务未暴露 /metrics 时可用 ENABLE_METRICS_SCRAPE=False 关闭抓取)"
+            )
+            _metrics_scrape_warned = True
+        return None
 
 
 def reset_bench_error_counter():
@@ -155,7 +185,7 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         if m['successful_requests'] <= 0:
             logging.error(f"  ┗━ 并发 {concurrency} 没有成功的请求,测试失败")
             time.sleep(POST_TEST_SLEEP)
-            return float('inf'), float('inf'), m
+            return -1, -1, m
 
         ttft = select_ttft(m, TTFT_LABEL)
         tpot = select_tpot(m, TPOT_LABEL)
@@ -212,6 +242,23 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         raise BenchmarkError("请调整参数重新运行") from e
 
 
+def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompts, dataset,
+                             vllm_bench_result_file_name, sweep_results_file_name,
+                             ttft_max, tpot_max, context_suffix):
+    """正式测试:前后各抓一次 /metrics,差值算 prefix cache 命中率与投机采样接受率,注入 metrics。"""
+    before = _scrape_metrics_snapshot()
+    ttft, tpot, metrics = _execute_test(
+        cmd, input_len, output_len, concurrency, num_prompts, dataset,
+        vllm_bench_result_file_name, sweep_results_file_name,
+        ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
+    )
+    if metrics:
+        cache_rate, spec_rate = compute_metrics_rates(before, _scrape_metrics_snapshot())
+        metrics['prefix_cache_hit_rate'] = cache_rate
+        metrics['spec_decode_accept_rate'] = spec_rate
+    return ttft, tpot, metrics
+
+
 def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int,
                                ttft_max: float, tpot_max: float,
                                vllm_bench_result_file_name: str, sweep_results_file_name: str,
@@ -246,16 +293,16 @@ def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int
                 f"开始正式测试 - 输入长度: {input_len}, 输出长度: {output_len}, "
                 f"并发数: {concurrency}, 请求数: {num_prompts}, 数据集: {dataset}"
             )
-            return _execute_test(
+            return _formal_test_with_scrape(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,
-                ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
+                ttft_max, tpot_max, context_suffix=context_suffix,
             )
         else:
-            return _execute_test(
+            return _formal_test_with_scrape(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,
-                ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
+                ttft_max, tpot_max, context_suffix=context_suffix,
             )
     except Exception as e:
         logging.error(f"测试执行失败: {str(e)}")
@@ -297,4 +344,4 @@ def run_benchmark_with_retry_and_metrics(input_len: int, output_len: int, concur
             time.sleep(RETRY_SLEEP)
 
     logging.error("所有尝试都失败，返回默认值")
-    return float('inf'), float('inf'), {}
+    return -1, -1, {}

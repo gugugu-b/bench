@@ -16,6 +16,7 @@ from .config import (
     TTFT_LABEL,
     TPOT_LABEL,
     compute_num_prompts,
+    dataset_prefix_fields,
     prefix_context_tag,
 )
 from .csv_io import write_to_csv
@@ -73,14 +74,18 @@ def point_metrics_row(dataset: str, input_len: int, output_len: int, point: Poin
                       pc_ratio: float, num_prefixes: int) -> list:
     """单个并发点的 point_metrics 表行(含两个单并发归一化吞吐列)。"""
     m = point.metrics
+    ds_pc, ds_np = dataset_prefix_fields(dataset, pc_ratio, num_prefixes)
     return [
-        dataset, input_len, output_len, point.concurrency, pc_ratio, num_prefixes,
+        dataset, input_len, output_len, point.concurrency, ds_pc, ds_np,
         m['mean_ttft'], m['mean_tpot'],
         m['output_token_throughput'], m['total_token_throughput'],
         m['benchmark_duration'],
         m['output_token_throughput'] / point.concurrency,
         # 单并发 decode 吞吐 = 1000/平均TPOT(ms),单条请求流的 decode 速率
         (1000 / m['mean_tpot']) if m['mean_tpot'] > 0 else 0.0,
+        # /metrics 前后快照差值(百分数);抓取失败/无该指标时为空串
+        m.get('prefix_cache_hit_rate', ''),
+        m.get('spec_decode_accept_rate', ''),
     ]
 
 
