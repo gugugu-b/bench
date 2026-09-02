@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.2.0
+
+- **prefix cache 命中率与投机采样接受率**：每次正式测试前后各抓取一次被测服务的
+  Prometheus `/metrics`（默认与 API 同 host:port），用计数器差值计算两项指标，
+  作为 `point_metrics` / `import_all_perf` 表的最后两列（百分数，空值表示不可用）：
+  - `prefix_cache_hit_rate` = Δprefix_cache_hits ÷ Δprefix_cache_queries × 100
+    （兼容 `vllm:gpu_prefix_cache_*` / `vllm:prefix_cache_*` / `vllm:cpu_prefix_cache_*` 命名）
+  - `spec_decode_accept_rate` = Δspec_decode_num_accepted_tokens ÷ Δspec_decode_num_draft_tokens × 100
+  - 抓取由 `ENABLE_METRICS_SCRAPE` 控制（默认开），失败只告警一次且不影响测试；
+    `METRICS_SCRAPE_PATH` / `METRICS_SCRAPE_TIMEOUT` 可调路径与超时
+- **支持 vLLM 与 SGLang 两种服务端**：按 `/metrics` 指标前缀自动识别后端——
+  vLLM 用 `vllm:gpu_prefix_cache_hits/queries` 与 `vllm:spec_decode_num_accepted/draft_tokens`
+  计数器差值；SGLang 用 `sglang:cached_tokens_total` / `sglang:prompt_tokens_total`
+  计数器差值（token 级命中率，不使用按 prefill 批次覆盖的 `sglang:cache_hit_rate` Gauge），
+  投机采样接受率取 `sglang:spec_accept_rate` Gauge 测试后快照值
+  （SGLang 未暴露接受 token 计数器，≤ 1 的值按比率换算百分数）。
+  同名多序列（如多 dp_rank 部署）按指标语义聚合：计数器求和、Gauge 取算术平均。
+- **适配 SGLang unified 引擎的真实指标形态**（经 4×dp_rank 服务端真实数据验证）：
+  - `cached_tokens_total` 仅有 TYPE 声明、无样本时，cache 命中率自动退回
+    `1 - Δuncached_prompt_tokens_histogram_sum ÷ Δprompt_tokens_total` 口径；
+  - 投机采样接受率按 dp_rank 配对 `spec_accept_length` 过滤空闲 rank
+    （length=0 表示该 rank 从未执行投机批次，0 值 rate 不参与平均），
+    避免空闲 rank 拉低整体均值。
+- 差值口径为「本次正式测试」，不含预热轮；预热对 cache 的预热效果会体现在正式轮的命中率中
+  （SGLang 的 spec_accept_rate 为服务端 Gauge，不含此口径保证）。
+- 修复：`pc_ratio` / `num_prefixes` 标识列在 random 等非 prefix_repetition 数据集下
+  误记回退默认值（0.9/1）的问题——这两列仅在 prefix_repetition 数据集记录真实值，
+  其余数据集留空（`point_metrics` / `import_all_perf` / `summary` / `best_metrics` 四表一致）。
+- 修复：测试点重试全部失败或「没有成功的请求」时返回值由 `inf` 改为失败约定 `-1`，
+  此前空 metrics 会以成功身份进入 point_metrics 行构造导致 KeyError 中断整个运行。
+
 ## v1.1.0
 
 - **按用例自定义前缀重复参数**：`IO` 用例新增可选字段 `pc_ratio`（prefix 在输入长度中的占比）
