@@ -110,12 +110,18 @@ bench/
   `output_throughput_per_concurrency`（单并发输出吞吐 = 生成输出吞吐 ÷ 并发数）、
   `decode_throughput_per_concurrency`（单并发 decode 吞吐 = 1000 ÷ 平均 TPOT，
   即单条请求流在 decode 阶段的 token 速率）；
-  最后两列来自被测服务 `/metrics` 正式测试前后快照（百分数），按指标前缀自动识别
-  vLLM / SGLang 后端：
+- `spec_decode_accept_rate`（投机采样接受率，百分数）：**优先取 bench serve 输出中直接打印的
+  本次测试 `Acceptance rate (%)`**（部分厂商 fork 的 vLLM 会打印，为逐轮精确值），输出中
+  没有该项时回退 `/metrics` 差值口径；
+- `prefix_cache_hit_rate`（prefix cache 命中率，百分数）：只能来自被测服务 `/metrics`
+  正式测试前后快照，按指标前缀自动识别 vLLM / SGLang 后端：
   - vLLM：`prefix_cache_hit_rate` = Δhits ÷ Δqueries × 100
-    （兼容 `vllm:gpu_prefix_cache_*` / `vllm:prefix_cache_*` / `vllm:cpu_prefix_cache_*`）；
-    `spec_decode_accept_rate` = Δaccepted ÷ Δdraft × 100
-    （`vllm:spec_decode_num_accepted_tokens` / `..._draft_tokens`，均为计数器差值）
+    （兼容 `vllm:gpu_prefix_cache_*` / `vllm:prefix_cache_*` / `vllm:cpu_prefix_cache_*`
+    三组候选名，计数器样本名的 `_total` 后缀自动解析）；
+    回退口径 `spec_decode_accept_rate` = Δaccepted ÷ Δdraft × 100
+    （`vllm:spec_decode_num_accepted_tokens` / `..._draft_tokens`，均为计数器差值）；
+    前提：vLLM 服务端需启用 `--enable-prefix-caching`，否则 cache 计数器不增长，
+    该列为空
   - SGLang：`prefix_cache_hit_rate` = Δcached ÷ Δprompt × 100（token 级命中率）；
     首选 `sglang:cached_tokens_total` / `sglang:prompt_tokens_total` 计数器差值，
     unified 等版本不导出 `cached_tokens_total` 样本时自动退回
@@ -158,4 +164,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.1.0**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.2.1**。

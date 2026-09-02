@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.1
+
+- 修复：vLLM `/metrics` 计数器样本名自动解析 Prometheus 导出的 `_total` 后缀
+  （如 `vllm:prefix_cache_queries` → `vllm:prefix_cache_queries_total`），
+  修复厂商 fork（如 vllm_hcu，实测 Qwen3.6-35B-A3B）上 prefix cache 命中率恒为空的问题
+  ——原实现只匹配无后缀候选名，与 prometheus_client 的 Counter 标准导出格式不符。
+- 修复：`spec_decode_accept_rate` 改为优先采用 bench serve 输出中直接打印的本次测试
+  `Acceptance rate (%)`（部分厂商 fork 的 vLLM 打印，如 vllm_hcu，为逐轮精确值），
+  输出中无该项时回退 `/metrics` 计数器差值口径（实测该 fork 全部 10 个测试点均可提取，
+  如 67.64%；此前该列在 fork 上恒为空，因 `/metrics` 未暴露 spec 计数器时直接放弃）。
+- 修复：`pc_ratio` / `num_prefixes` 标识列在 random 等非 prefix_repetition 数据集下
+  误记回退默认值（0.9/1）的问题——这两列仅在 prefix_repetition 数据集记录真实值，
+  其余数据集留空（`point_metrics` / `import_all_perf` / `summary` / `best_metrics` 四表一致）。
+- 修复：测试点重试全部失败或「没有成功的请求」时返回值由 `inf` 改为失败约定 `-1`，
+  此前空 metrics 会以成功身份进入 point_metrics 行构造导致 KeyError 中断整个运行。
+- 注意：vLLM 服务端需启用 `--enable-prefix-caching`，prefix cache 计数器才会增长，
+  否则 `prefix_cache_hit_rate` 为空（实测未开启的部署，计数器恒为 0）。
+
 ## v1.2.0
 
 - **prefix cache 命中率与投机采样接受率**：每次正式测试前后各抓取一次被测服务的
@@ -25,11 +43,6 @@
     避免空闲 rank 拉低整体均值。
 - 差值口径为「本次正式测试」，不含预热轮；预热对 cache 的预热效果会体现在正式轮的命中率中
   （SGLang 的 spec_accept_rate 为服务端 Gauge，不含此口径保证）。
-- 修复：`pc_ratio` / `num_prefixes` 标识列在 random 等非 prefix_repetition 数据集下
-  误记回退默认值（0.9/1）的问题——这两列仅在 prefix_repetition 数据集记录真实值，
-  其余数据集留空（`point_metrics` / `import_all_perf` / `summary` / `best_metrics` 四表一致）。
-- 修复：测试点重试全部失败或「没有成功的请求」时返回值由 `inf` 改为失败约定 `-1`，
-  此前空 metrics 会以成功身份进入 point_metrics 行构造导致 KeyError 中断整个运行。
 
 ## v1.1.0
 
