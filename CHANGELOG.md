@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.0
+
+- **配置整理**：`config.py` 环境相关配置集中到文件顶部统一管理——被测服务参数
+  （`HOST` / `PORT` / `BACKEND` / `SERVED_MODEL_NAME` / `MODEL` / `IGNORE_EOS`）与
+  perf_log 参数（`PERF_LOG_DIR` / `PERF_MODEL_NAME`）原先散落在文件中段，
+  现归入顶部「环境配置」分节，切换被测环境只需修改文件顶部一处；
+  仅调整位置，变量取值不变，无功能性变更。
+- **默认值调整**：`WARMUP_ROUNDS` 中 `prefix_repetition` 的预热轮数由 4 调整为 1，
+  即默认值变为 `{"random": 1, "prefix_repetition": 1}`（用例级 `warmup_rounds`
+  仍可按需覆盖）。
+- 文档：README 配置表与指标口径说明补充服务端前置要求——SGLang 需启动时加
+  `--enable-metrics` 才暴露 `/metrics`（vLLM 需 `--enable-prefix-caching` 的
+  说明已在 v1.2.0 / v1.2.1 给出）。
+
 ## v1.2.1
 
 - 修复：vLLM `/metrics` 计数器样本名自动解析 Prometheus 导出的 `_total` 后缀

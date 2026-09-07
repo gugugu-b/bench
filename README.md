@@ -42,7 +42,7 @@ python run.py
 
 ## 配置
 
-所有配置集中在 `bench_core/config.py`：
+所有配置集中在 `bench_core/config.py`，环境相关配置（被测服务信息、perf_log 输出）统一放在文件顶部「环境配置」分节，切换环境只需改顶部一处：
 
 | 配置项                                                  | 含义                                                                                                                                                                        | 默认值                                    |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
@@ -55,8 +55,8 @@ python run.py
 | `HOST` / `PORT` / `SERVED_MODEL_NAME` / `MODEL` | 被测 vLLM 服务信息                                                                                                                                                          | 见文件                                    |
 | `PREFIX_REPETITION_PC_RATIO` 等                       | 前缀重复数据集全局默认参数（前缀占比 / 前缀数），可在`IO` 用例里用 `pc_ratio` / `num_prefixes` 按用例覆盖                                                             | `0.9` / `1`                           |
 | `ENABLE_DOUBLE_RUN`                                   | 是否开启预热：正式测试前先用相同命令预热若干轮                                                                                                                              | `True`                                  |
-| `WARMUP_ROUNDS` | 预热轮数（`ENABLE_DOUBLE_RUN=True` 时生效）；int 为所有数据集统一轮数，dict 按数据集指定（如 `{"random": 1, "prefix_repetition": 4}`）；用例级 `warmup_rounds` 可覆盖 | `{"random": 1, "prefix_repetition": 4}` |
-| `ENABLE_METRICS_SCRAPE` 等 | 是否从被测服务 `/metrics`（Prometheus，vLLM 默认与 API 同端口）抓取指标，计算 prefix cache 命中率与投机采样接受率；`METRICS_SCRAPE_PATH` / `METRICS_SCRAPE_TIMEOUT` 控制路径与超时 | `True` / `/metrics` / `5` |
+| `WARMUP_ROUNDS` | 预热轮数（`ENABLE_DOUBLE_RUN=True` 时生效）；int 为所有数据集统一轮数，dict 按数据集指定（如 `{"random": 1, "prefix_repetition": 4}`）；用例级 `warmup_rounds` 可覆盖 | `{"random": 1, "prefix_repetition": 1}` |
+| `ENABLE_METRICS_SCRAPE` 等 | 是否从被测服务 `/metrics`（Prometheus）抓取指标，计算 prefix cache 命中率与投机采样接受率；`METRICS_SCRAPE_PATH` / `METRICS_SCRAPE_TIMEOUT` 控制路径与超时。**服务端要求**：vLLM 默认与 API 同端口暴露（需 `--enable-prefix-caching` 才有 cache 数据）；SGLang 需启动时加 `--enable-metrics` | `True` / `/metrics` / `5` |
 | `MAX_RETRIES` / `BENCH_MAX_ERRORS`                  | 失败重试次数 / 连续失败上限                                                                                                                                                 | `2` / `3`                             |
 | `SUBPROCESS_TIMEOUT`                                  | 单次子进程超时（秒）                                                                                                                                                        | `3600`                                  |
 | `PERF_LOG_DIR`                                        | perf_log 输出目录                                                                                                                                                           | `./bench/perf_log`                      |
@@ -122,7 +122,8 @@ bench/
     （`vllm:spec_decode_num_accepted_tokens` / `..._draft_tokens`，均为计数器差值）；
     前提：vLLM 服务端需启用 `--enable-prefix-caching`，否则 cache 计数器不增长，
     该列为空
-  - SGLang：`prefix_cache_hit_rate` = Δcached ÷ Δprompt × 100（token 级命中率）；
+  - SGLang：需在服务端启动参数中加 `--enable-metrics` 开启 `/metrics` 暴露；
+    `prefix_cache_hit_rate` = Δcached ÷ Δprompt × 100（token 级命中率）；
     首选 `sglang:cached_tokens_total` / `sglang:prompt_tokens_total` 计数器差值，
     unified 等版本不导出 `cached_tokens_total` 样本时自动退回
     `1 - Δsglang:uncached_prompt_tokens_histogram_sum ÷ Δprompt_tokens_total`
@@ -164,4 +165,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.2.1**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.0**。
