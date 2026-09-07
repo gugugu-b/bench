@@ -9,7 +9,21 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.2.1"
+VERSION = "v1.3.0"
+
+# ============================================================
+# 环境配置(被测服务 + perf_log 输出,切换环境改这里)
+# ============================================================
+HOST = "0.0.0.0"
+PORT = "30000"
+BACKEND = "vllm"
+SERVED_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"
+MODEL = "/data/model/DeepSeek-V4-Flash-Channel-FP8-w8a8"
+IGNORE_EOS = "--ignore-eos"
+
+# perf_log 相关
+PERF_LOG_DIR = "./bench/perf_log"
+PERF_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"  # 与 SERVED_MODEL_NAME 一致
 
 # 数据集模式: 支持 "random" / "prefix_repetition",可填多个,按顺序各跑一遍
 # 用例可用 datasets 字段指定自己要跑的数据集列表,不填的用例用这里的全局默认
@@ -146,14 +160,6 @@ SCRIPT_START_DATE = time.strftime("%Y%m%d")
 TTFT_LABEL = "Mean TTFT"
 TPOT_LABEL = "Mean TPOT"
 
-# vllm bench serve 固定参数
-HOST = "0.0.0.0"
-PORT = "30000"
-BACKEND = "vllm"
-SERVED_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"
-MODEL = "/data/model/DeepSeek-V4-Flash-Channel-FP8-w8a8"
-IGNORE_EOS = "--ignore-eos"
-
 # ============================================================
 # 数据集参数
 # ============================================================
@@ -174,7 +180,7 @@ ENABLE_DOUBLE_RUN = True            # 开启预热:正式测试前先用相同�
 #   WARMUP_ROUNDS = 1
 #   WARMUP_ROUNDS = {"random": 1, "prefix_repetition": 4}
 # 用例级可用 warmup_rounds 字段覆盖,写法相同;填 0 表示该场景不预热
-WARMUP_ROUNDS = {"random": 1, "prefix_repetition": 4}
+WARMUP_ROUNDS = {"random": 1, "prefix_repetition": 1}
 
 # 运行时参数
 SUBPROCESS_TIMEOUT = 3600       # vllm bench serve 子进程超时(秒)
@@ -187,10 +193,6 @@ ENABLE_METRICS_SCRAPE = True    # 是否抓取 /metrics
 METRICS_SCRAPE_PATH = "/metrics"  # 抓取路径
 METRICS_SCRAPE_TIMEOUT = 5      # 抓取超时(秒)
 RETRY_SLEEP = 2                 # 失败重试间隔(秒)
-
-# perf_log 相关
-PERF_LOG_DIR = "./bench/perf_log"
-PERF_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"  # 与 SERVED_MODEL_NAME 一致
 
 # ============================================================
 # CSV 表头
