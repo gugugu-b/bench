@@ -60,6 +60,8 @@ python run.py
 | `MAX_RETRIES` / `BENCH_MAX_ERRORS`                  | 失败重试次数 / 连续失败上限                                                                                                                                                 | `2` / `3`                             |
 | `SUBPROCESS_TIMEOUT`                                  | 单次子进程超时（秒）                                                                                                                                                        | `3600`                                  |
 | `PERF_LOG_DIR`                                        | perf_log 输出目录                                                                                                                                                           | `./bench/perf_log`                      |
+| `SAVE_WARMUP_LOG`                                    | 预热轮数据是否落盘（统计 CSV + perf_log，含两个比率列）                                                                                                                     | `True`                                  |
+| `PRE_LOG_DIR`                                         | 预热数据输出根目录（内部镜像 log/ 与 perf_log/ 结构，与 `bench/` 平级）                                                                                                      | `./pre-log`                             |
 
 `IO` 中每个用例的字段：
 
@@ -80,7 +82,7 @@ python run.py
 
 ## 输出说明
 
-运行产物统一写入当前工作目录下的 `bench/`：
+正式测试产物统一写入当前工作目录下的 `bench/`；预热轮数据另存到平级的 `pre-log/`：
 
 ```
 bench/
@@ -97,6 +99,15 @@ bench/
 └── perf_log/
     └── <模型名>_<dataset>[_pc{占比}_np{前缀数}]/
         └── il*_ol*_np*_mc*.log               # 原始子进程输出 + 提取的指标（文件名格式固定，供导入使用）
+
+pre-log/                                        # 预热轮数据（SAVE_WARMUP_LOG=True 时写入）
+├── log/
+│   └── YYYYMMDD/
+│       └── context_<il>x<ol>[_pc{占比}_np{前缀数}]/
+│           └── vllm_bench_result-*.csv       # 每轮预热一行：正式表头 + 末尾两列比率
+└── perf_log/
+    └── <模型名>_<dataset>[_pc{占比}_np{前缀数}]/
+        └── il*_ol*_np*_mc*.log               # 与正式 perf_log 同名同格式（多轮覆盖，只留最后一轮）
 ```
 
 - `sweep_results` 的 `passed=1` 表示该点 TTFT 与 TPOT 同时在阈值内；
@@ -141,6 +152,12 @@ bench/
   收录本次运行所有「用例 × 数据集」组合的每个成功并发点，运行结束整体重写；
 - `summary` 与 `best_metrics` 同样带 `pc_ratio` / `num_prefixes` 标识列；
   `summary` 的 `points_passed / points_total` 为该组合的达标点数与总点数。
+- `pre-log/`（预热数据）：目录结构与 `bench/` 的 `log/`、`perf_log/` 镜像，文件名与正式输出
+  完全一致；统计 CSV 表头为正式 `vllm_bench_result` 在末尾追加 `prefix_cache_hit_rate` /
+  `spec_decode_accept_rate` 两列——每轮预热前后抓一次 `/metrics` 快照按差值计算，
+  口径为「该轮预热」（与正式测试的逐轮差值口径一致），spec 仍优先取 bench 输出直接打印的
+  接受率；多轮预热 CSV 逐轮追加、perf_log 覆盖写（与正式一致只留最后一轮）；
+  开关为 `SAVE_WARMUP_LOG`，根目录为 `PRE_LOG_DIR`，不影响 `bench/` 下的任何正式输出。
 
 ---
 
@@ -165,4 +182,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.0**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.1**。

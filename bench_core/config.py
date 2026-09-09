@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.3.0"
+VERSION = "v1.3.1"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
@@ -24,6 +24,9 @@ IGNORE_EOS = "--ignore-eos"
 # perf_log 相关
 PERF_LOG_DIR = "./bench/perf_log"
 PERF_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"  # 与 SERVED_MODEL_NAME 一致
+
+# 预热数据输出根目录(内部镜像 bench/ 的 log/ 与 perf_log/ 结构),与 bench/ 平级
+PRE_LOG_DIR = "./pre-log"
 
 # 数据集模式: 支持 "random" / "prefix_repetition",可填多个,按顺序各跑一遍
 # 用例可用 datasets 字段指定自己要跑的数据集列表,不填的用例用这里的全局默认
@@ -174,6 +177,7 @@ PREFIX_REPETITION_NUM_PREFIXES = 1
 MAX_RETRIES = 2                    # 单次测试失败后的重试次数
 BENCH_MAX_ERRORS = MAX_RETRIES + 1  # 子进程连续失败上限,超出则抛 BenchmarkError
 ENABLE_DOUBLE_RUN = True            # 开启预热:正式测试前先用相同命令预热若干轮
+SAVE_WARMUP_LOG = True              # 预热数据落盘到 PRE_LOG_DIR(统计 CSV + perf_log)
 
 # 预热轮数(仅 ENABLE_DOUBLE_RUN=True 时生效)
 # 可为 int(所有数据集统一轮数)或 dict(按数据集指定,未列出的数据集回退 1 轮),如:
@@ -209,6 +213,9 @@ _METRIC_COLUMNS = [
 VLLM_BENCH_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "num_prompts",
 ] + _METRIC_COLUMNS
+
+# 预热统计 CSV 表头:正式 vllm_bench_result 基础上追加两个比率列
+WARMUP_BENCH_HEADERS = VLLM_BENCH_HEADERS + ["prefix_cache_hit_rate", "spec_decode_accept_rate"]
 
 # 每个并发点一行,passed=1 表示该点同时满足 TTFT/TPOT 阈值
 SWEEP_HEADERS = [

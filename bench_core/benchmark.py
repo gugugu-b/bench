@@ -23,14 +23,17 @@ from .config import (
     PERF_MODEL_NAME,
     PORT,
     POST_TEST_SLEEP,
+    PRE_LOG_DIR,
     PREFIX_REPETITION_DATASET_NAME,
     RETRY_SLEEP,
+    SAVE_WARMUP_LOG,
     SERVED_MODEL_NAME,
     SUBPROCESS_TIMEOUT,
     SWEEP_HEADERS,
     TTFT_LABEL,
     TPOT_LABEL,
     VLLM_BENCH_HEADERS,
+    WARMUP_BENCH_HEADERS,
     compute_num_prompts,
     prefix_context_tag,
 )
@@ -81,13 +84,15 @@ def reset_bench_error_counter():
 
 
 def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_prompts: int,
-                        dataset: str, metrics: dict, raw_output: str, context_suffix: str = ""):
+                        dataset: str, metrics: dict, raw_output: str, context_suffix: str = "",
+                        log_base_dir: str = None):
     """保存 perf_log 格式的日志条目(原始输出 + 提取的指标)。
 
-    目录: perf_log/<模型名>_<dataset>{context_suffix}/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
+    目录: <log_base_dir>/<模型名>_<dataset>{context_suffix}/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
     文件名格式固定,供外部导入使用;同名用例(如不同 pc_ratio)靠目录后缀区分。
+    log_base_dir 缺省用 PERF_LOG_DIR,预热数据传 PRE_LOG_DIR 下的 perf_log/。
     """
-    log_dir = os.path.join(PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}{context_suffix}")
+    log_dir = os.path.join(log_base_dir or PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}{context_suffix}")
     os.makedirs(log_dir, exist_ok=True)
     sub_log_file = os.path.join(
         log_dir, f"il{input_len}_ol{output_len}_np{num_prompts}_mc{concurrency}.log"
@@ -167,6 +172,20 @@ def meet_requirements(ttft: float, tpot: float, ttft_max: float, tpot_max: float
     return ttft <= ttft_max and tpot <= tpot_max
 
 
+def _vllm_bench_row(dataset: str, input_len: int, output_len: int, concurrency: int,
+                    num_prompts: int, m: dict) -> list:
+    """vllm_bench_result 表行(标识列 + 全量指标列),正式与预热统计 CSV 共用。"""
+    return [
+        dataset, input_len, output_len, concurrency, num_prompts,
+        m['successful_requests'], m['benchmark_duration'],
+        m['total_input_tokens'], m['total_generated_tokens'],
+        m['req_throughput'], m['output_token_throughput'], m['total_token_throughput'],
+        m['mean_ttft'], m['median_ttft'], m['p99_ttft'],
+        m['mean_tpot'], m['median_tpot'], m['p99_tpot'],
+        m['mean_itl'], m['median_itl'], m['p99_itl'],
+    ]
+
+
 def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                   vllm_bench_result_file_name, sweep_results_file_name,
                   ttft_max, tpot_max, is_warmup=False, context_suffix=""):
@@ -192,15 +211,7 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
 
         if not is_warmup:
             write_to_csv(
-                [
-                    dataset, input_len, output_len, concurrency, num_prompts,
-                    m['successful_requests'], m['benchmark_duration'],
-                    m['total_input_tokens'], m['total_generated_tokens'],
-                    m['req_throughput'], m['output_token_throughput'], m['total_token_throughput'],
-                    m['mean_ttft'], m['median_ttft'], m['p99_ttft'],
-                    m['mean_tpot'], m['median_tpot'], m['p99_tpot'],
-                    m['mean_itl'], m['median_itl'], m['p99_itl'],
-                ],
+                _vllm_bench_row(dataset, input_len, output_len, concurrency, num_prompts, m),
                 vllm_bench_result_file_name,
                 headers=VLLM_BENCH_HEADERS,
                 input_len=input_len,
@@ -225,6 +236,11 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
             save_perf_log_entry(input_len, output_len, concurrency, num_prompts, dataset, m, output,
                                 context_suffix)
         else:
+            if SAVE_WARMUP_LOG:
+                save_perf_log_entry(
+                    input_len, output_len, concurrency, num_prompts, dataset, m, output,
+                    context_suffix, log_base_dir=os.path.join(PRE_LOG_DIR, "perf_log"),
+                )
             logging.info(
                 f"  ┗━ 预热并发 {concurrency} (np={num_prompts}, {dataset}): "
                 f"{TTFT_LABEL}={ttft}ms, {TPOT_LABEL}={tpot}ms"
@@ -242,6 +258,22 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         raise BenchmarkError("请调整参数重新运行") from e
 
 
+def _inject_rate_metrics(metrics: dict, before: dict):
+    """用 before/after 快照差值计算两个比率并注入 metrics(正式与预热共用)。
+
+    prefix_cache_hit_rate 只能来自 /metrics 差值;
+    spec_decode_accept_rate 优先用 bench serve 输出直接打印的本次测试接受率
+    (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径)。
+    快照缺失、指标不存在或分母为 0 时对应值为空串。
+    """
+    cache_rate, spec_rate = compute_metrics_rates(before, _scrape_metrics_snapshot())
+    metrics['prefix_cache_hit_rate'] = cache_rate
+    bench_rate = metrics.get('spec_accept_rate', float('inf'))
+    if math.isfinite(bench_rate):
+        spec_rate = round(bench_rate, 2)
+    metrics['spec_decode_accept_rate'] = spec_rate
+
+
 def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                              vllm_bench_result_file_name, sweep_results_file_name,
                              ttft_max, tpot_max, context_suffix):
@@ -253,14 +285,36 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
         ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
     )
     if metrics:
-        cache_rate, spec_rate = compute_metrics_rates(before, _scrape_metrics_snapshot())
-        metrics['prefix_cache_hit_rate'] = cache_rate
-        # fork 版 bench serve 直接打印的本次测试接受率优先于 /metrics 差值
-        # (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径)
-        bench_rate = metrics.get('spec_accept_rate', float('inf'))
-        if math.isfinite(bench_rate):
-            spec_rate = round(bench_rate, 2)
-        metrics['spec_decode_accept_rate'] = spec_rate
+        _inject_rate_metrics(metrics, before)
+    return ttft, tpot, metrics
+
+
+def _warmup_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompts, dataset,
+                             vllm_bench_result_file_name, sweep_results_file_name,
+                             ttft_max, tpot_max, context_suffix):
+    """预热轮:前后各抓一次 /metrics,差值算两个比率,连同全量指标写预热统计 CSV。
+
+    差值口径为「本轮预热」,与正式测试逐轮独立的口径一致;
+    CSV 落在 PRE_LOG_DIR 下,表头为正式 vllm_bench_result 追加两个比率列。
+    """
+    before = _scrape_metrics_snapshot() if SAVE_WARMUP_LOG else None
+    ttft, tpot, metrics = _execute_test(
+        cmd, input_len, output_len, concurrency, num_prompts, dataset,
+        vllm_bench_result_file_name, sweep_results_file_name,
+        ttft_max, tpot_max, is_warmup=True, context_suffix=context_suffix,
+    )
+    if ttft != -1 and SAVE_WARMUP_LOG:
+        _inject_rate_metrics(metrics, before)
+        write_to_csv(
+            _vllm_bench_row(dataset, input_len, output_len, concurrency, num_prompts, metrics)
+            + [metrics.get('prefix_cache_hit_rate', ''), metrics.get('spec_decode_accept_rate', '')],
+            vllm_bench_result_file_name,
+            headers=WARMUP_BENCH_HEADERS,
+            input_len=input_len,
+            output_len=output_len,
+            context_suffix=context_suffix,
+            base_dir=os.path.join(PRE_LOG_DIR, "log"),
+        )
     return ttft, tpot, metrics
 
 
@@ -285,10 +339,10 @@ def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int
                     f"输出长度: {output_len}, 并发数: {concurrency}, "
                     f"请求数: {num_prompts}, 数据集: {dataset}"
                 )
-                warmup_ttft, warmup_tpot, _ = _execute_test(
+                warmup_ttft, warmup_tpot, _ = _warmup_test_with_scrape(
                     cmd, input_len, output_len, concurrency, num_prompts, dataset,
                     vllm_bench_result_file_name, sweep_results_file_name,
-                    ttft_max, tpot_max, is_warmup=True, context_suffix=context_suffix,
+                    ttft_max, tpot_max, context_suffix=context_suffix,
                 )
                 if warmup_ttft == -1 or warmup_tpot == -1:
                     logging.error("预热测试失败，直接返回失败")
