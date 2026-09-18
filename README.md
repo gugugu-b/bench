@@ -53,6 +53,7 @@ python run.py
 | `DEFAULT_TTFT_MAX` / `DEFAULT_TPOT_MAX`             | 全局阈值默认值 (ms)                                                                                                                                                         | `3000` / `100`                        |
 | `TTFT_LABEL` / `TPOT_LABEL`                         | 判定用指标，可选 Mean / Median / P99                                                                                                                                        | `Mean`                                  |
 | `HOST` / `PORT` / `SERVED_MODEL_NAME` / `MODEL` | 被测 vLLM 服务信息                                                                                                                                                          | 见文件                                    |
+| `TEMPERATURE`                                         | bench serve 采样温度（random / prefix_repetition 两种模式共用）                                                                                                             | `0`                                     |
 | `PREFIX_REPETITION_PC_RATIO` 等                       | 前缀重复数据集全局默认参数（前缀占比 / 前缀数），可在`IO` 用例里用 `pc_ratio` / `num_prefixes` 按用例覆盖                                                             | `0.9` / `1`                           |
 | `ENABLE_DOUBLE_RUN`                                   | 是否开启预热：正式测试前先用相同命令预热若干轮                                                                                                                              | `True`                                  |
 | `WARMUP_ROUNDS` | 预热轮数（`ENABLE_DOUBLE_RUN=True` 时生效）；int 为所有数据集统一轮数，dict 按数据集指定（如 `{"random": 1, "prefix_repetition": 4}`）；用例级 `warmup_rounds` 可覆盖 | `{"random": 1, "prefix_repetition": 1}` |
@@ -80,14 +81,15 @@ python run.py
 
 ## 输出说明
 
-运行产物统一写入当前工作目录下的 `bench/`：
+运行产物统一写入当前工作目录下的 `bench/`；`log/` 按执行时间戳
+（`YYYYMMDD_HHMMSS`，启动时刻）分目录，同一天多次执行互不覆盖：
 
 ```
 bench/
 ├── best_metrics_YYYYMMDD_HHMMSS.csv          # 最优并发点的全量指标（每用例×数据集一行）
 ├── import_all_perf.csv                       # 全场景汇总：所有场景的逐并发点关键性能指标（每次运行重写）
 ├── log/
-│   └── YYYYMMDD/                             # 按运行日期归档
+│   └── YYYYMMDD_HHMMSS/                      # 按执行时间戳归档，一次执行一个目录
 │       ├── summary_YYYYMMDD_HHMMSS.csv       # 汇总：最优并发 / 阈值 / 达标点数等
 │       └── context_<il>x<ol>/                # 按场景分目录；prefix_repetition 数据集目录名
 │           │                                 #   追加 _pc{占比}_np{前缀数} 后缀（如 context_1024x1024_pc0.9_np1）
@@ -165,4 +167,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.0**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.2**。

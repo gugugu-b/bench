@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.2
+
+- **输出目录按执行时间戳归档**：`bench/log/` 由按运行日期（`YYYYMMDD`）改为按
+  执行时间戳（`YYYYMMDD_HHMMSS`，启动时刻）分目录，一次执行一个独立目录，
+  同一天多次执行的数据互不覆盖、互不混淆：
+  - `config.py` 新增 `SCRIPT_START_STAMP`（单次执行完整时间戳，模块加载时固定），
+    `write_to_csv` 与 summary 写入统一改用之；
+  - 各 context CSV 与 `summary_<时间戳>.csv` 归入本次执行目录；
+  - `best_metrics_<时间戳>.csv` 文件名格式不变（本就含执行时间戳）；
+  - `import_all_perf.csv` 与 `perf_log/` 保持原有「每次运行重写、只留最新」语义不变。
+- **bench serve 命令下发采样温度**：`config.py` 顶部环境配置区新增 `TEMPERATURE`
+  （默认 `0`，random / prefix_repetition 两种模式共用），
+  两种数据集模式的命令统一追加 `--temperature` 参数，取值可自行调整。
+
 ## v1.3.0
 
 - **配置整理**：`config.py` 环境相关配置集中到文件顶部统一管理——被测服务参数
