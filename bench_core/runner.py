@@ -11,8 +11,7 @@ from .config import (
     ENABLE_DOUBLE_RUN,
     IO,
     POINT_METRICS_HEADERS,
-    SCRIPT_START_DATE,
-    SCRIPT_START_TIME,
+    SCRIPT_START_STAMP,
     SUMMARY_HEADERS,
     VERSION,
     dataset_prefix_fields,
@@ -35,9 +34,9 @@ _METRIC_KEYS = [
 
 
 def _write_summary_csv(summary_results):
-    summary_dir = os.path.join(os.getcwd(), "bench", "log", SCRIPT_START_DATE)
+    summary_dir = os.path.join(os.getcwd(), "bench", "log", SCRIPT_START_STAMP)
     os.makedirs(summary_dir, exist_ok=True)
-    summary_file = os.path.join(summary_dir, f"summary_{SCRIPT_START_DATE}_{SCRIPT_START_TIME}.csv")
+    summary_file = os.path.join(summary_dir, f"summary_{SCRIPT_START_STAMP}.csv")
     with open(summary_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(SUMMARY_HEADERS)
@@ -50,7 +49,7 @@ def _write_best_metrics_csv(summary_results):
     best_metrics_dir = os.path.join(os.getcwd(), "bench")
     os.makedirs(best_metrics_dir, exist_ok=True)
     best_metrics_file = os.path.join(
-        best_metrics_dir, f"best_metrics_{SCRIPT_START_DATE}_{SCRIPT_START_TIME}.csv"
+        best_metrics_dir, f"best_metrics_{SCRIPT_START_STAMP}.csv"
     )
     with open(best_metrics_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)

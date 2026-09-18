@@ -5,7 +5,7 @@ import logging
 import os
 from typing import List
 
-from .config import SCRIPT_START_DATE
+from .config import SCRIPT_START_STAMP
 
 
 def get_base_filename(prefix: str, input_len: int, output_len: int,
@@ -17,7 +17,7 @@ def get_base_filename(prefix: str, input_len: int, output_len: int,
 
 def write_to_csv(data: List, filename: str = "results.csv", headers: List = None,
                  input_len: int = None, output_len: int = None, context_suffix: str = ""):
-    """将一行 data 追加到 CSV。目录按日期 + 上下文组合自动生成。"""
+    """将一行 data 追加到 CSV。目录按执行时间戳 + 上下文组合自动生成。"""
     context_str = (
         f"{input_len}x{output_len}{context_suffix}" if input_len and output_len else "unknown"
     )
@@ -25,7 +25,7 @@ def write_to_csv(data: List, filename: str = "results.csv", headers: List = None
         os.getcwd(),
         "bench",
         "log",
-        SCRIPT_START_DATE,
+        SCRIPT_START_STAMP,
         f"context_{context_str}",
     )
     os.makedirs(log_dir, exist_ok=True)

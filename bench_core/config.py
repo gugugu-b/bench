@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.3.0"
+VERSION = "v1.3.2"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
@@ -20,6 +20,7 @@ BACKEND = "vllm"
 SERVED_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"
 MODEL = "/data/model/DeepSeek-V4-Flash-Channel-FP8-w8a8"
 IGNORE_EOS = "--ignore-eos"
+TEMPERATURE = 0                    # bench serve 采样温度(random / prefix_repetition 两种模式共用)
 
 # perf_log 相关
 PERF_LOG_DIR = "./bench/perf_log"
@@ -155,6 +156,8 @@ def resolve_warmup_rounds(case_rounds, dataset: str) -> int:
 # 脚本启动时间戳(模块加载时计算一次,全包共享)
 SCRIPT_START_TIME = time.strftime("%H%M%S")
 SCRIPT_START_DATE = time.strftime("%Y%m%d")
+# 单次执行完整时间戳(YYYYMMDD_HHMMSS):bench/log 按此分目录,同一天多次执行互不覆盖
+SCRIPT_START_STAMP = f"{SCRIPT_START_DATE}_{SCRIPT_START_TIME}"
 
 # TTFT/TPOT 标签:可选 "Mean TTFT" / "Median TTFT" / "P99 TTFT" 等
 TTFT_LABEL = "Mean TTFT"

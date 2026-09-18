@@ -28,6 +28,7 @@ from .config import (
     SERVED_MODEL_NAME,
     SUBPROCESS_TIMEOUT,
     SWEEP_HEADERS,
+    TEMPERATURE,
     TTFT_LABEL,
     TPOT_LABEL,
     VLLM_BENCH_HEADERS,
@@ -120,6 +121,7 @@ def _build_bench_cmd(input_len: int, output_len: int, concurrency: int,
         "--model", MODEL,
         "--num-prompts", str(num_prompts),
         "--max-concurrency", str(concurrency),
+        "--temperature", str(TEMPERATURE),
     ]
 
     if dataset == PREFIX_REPETITION_DATASET_NAME:
