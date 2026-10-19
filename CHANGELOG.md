@@ -6,6 +6,10 @@
   延迟均值（毫秒），置于 `benchmark_duration` 之后，取值口径参考 SLO 项目——
   从 bench serve 输出正则提取 `Mean E2EL (ms)`，未打印该指标时留空；
   两表共用 `POINT_METRICS_HEADERS`，`vllm_bench_result` 全量指标表结构不变。
+- **bench serve 命令下发 `--percentile-metrics`**：`config.py` 环境配置区新增
+  `PERCENTILE_METRICS`（默认 `ttft,tpot,itl,e2el`，两种数据集模式共用）。
+  上游 vLLM 默认只统计 `ttft,tpot,itl`，不含 `e2el`——不带该参数时 bench 输出
+  没有 E2EL 统计，`mean_e2el` 列将一直为空，两项变更配套生效。
 
 ## v1.3.2
 
