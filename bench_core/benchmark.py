@@ -21,6 +21,7 @@ from .config import (
     MODEL,
     PERF_LOG_DIR,
     PERF_MODEL_NAME,
+    PERCENTILE_METRICS,
     PORT,
     POST_TEST_SLEEP,
     PREFIX_REPETITION_DATASET_NAME,
@@ -122,6 +123,7 @@ def _build_bench_cmd(input_len: int, output_len: int, concurrency: int,
         "--num-prompts", str(num_prompts),
         "--max-concurrency", str(concurrency),
         "--temperature", str(TEMPERATURE),
+        "--percentile-metrics", PERCENTILE_METRICS,
     ]
 
     if dataset == PREFIX_REPETITION_DATASET_NAME:

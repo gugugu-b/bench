@@ -21,6 +21,7 @@ SERVED_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"
 MODEL = "/data/model/DeepSeek-V4-Flash-Channel-FP8-w8a8"
 IGNORE_EOS = "--ignore-eos"
 TEMPERATURE = 0                    # bench serve 采样温度(random / prefix_repetition 两种模式共用)
+PERCENTILE_METRICS = "ttft,tpot,itl,e2el"  # --percentile-metrics,e2el 为端到端时延
 
 # perf_log 相关
 PERF_LOG_DIR = "./bench/perf_log"
