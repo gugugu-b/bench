@@ -108,7 +108,9 @@ bench/
   记录回退默认值 0.9/1），
   指标列为：`mean_ttft` / `mean_tpot`（平均延迟）、
   `output_token_throughput`（生成输出吞吐）、`total_token_throughput`（总吞吐）、
-  `benchmark_duration`（总耗时，秒），以及两个单并发归一化指标：
+  `benchmark_duration`（总耗时，秒）、
+  `mean_e2el`（逐 token 端到端延迟均值，毫秒；bench serve 未打印该指标时留空），
+  以及两个单并发归一化指标：
   `output_throughput_per_concurrency`（单并发输出吞吐 = 生成输出吞吐 ÷ 并发数）、
   `decode_throughput_per_concurrency`（单并发 decode 吞吐 = 1000 ÷ 平均 TPOT，
   即单条请求流在 decode 阶段的 token 速率）；
@@ -167,4 +169,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.2**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.3**。

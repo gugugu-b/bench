@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.3
+
+- **`import_all_perf.csv` / `point_metrics` 新增 `mean_e2el` 列**：逐 token 端到端
+  延迟均值（毫秒），置于 `benchmark_duration` 之后，取值口径参考 SLO 项目——
+  从 bench serve 输出正则提取 `Mean E2EL (ms)`，未打印该指标时留空；
+  两表共用 `POINT_METRICS_HEADERS`，`vllm_bench_result` 全量指标表结构不变。
+
 ## v1.3.2
 
 - **输出目录按执行时间戳归档**：`bench/log/` 由按运行日期（`YYYYMMDD`）改为按
