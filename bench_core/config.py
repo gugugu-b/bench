@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.3.2"
+VERSION = "v1.3.3"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
@@ -224,10 +224,11 @@ SWEEP_HEADERS = [
 # output_throughput_per_concurrency = output_token_throughput / concurrency
 # decode_throughput_per_concurrency = 1000 / mean_tpot,即单条请求流的 decode 速率(tok/s)
 # prefix_cache_hit_rate / spec_decode_accept_rate 来自 /metrics 正式测试前后快照差值(百分数,不可用为空)
+# mean_e2el = 逐 token 端到端延迟均值(ms),bench serve 未打印该指标时留空
 POINT_METRICS_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "pc_ratio", "num_prefixes",
     "mean_ttft", "mean_tpot",
-    "output_token_throughput", "total_token_throughput", "benchmark_duration",
+    "output_token_throughput", "total_token_throughput", "benchmark_duration", "mean_e2el",
     "output_throughput_per_concurrency", "decode_throughput_per_concurrency",
     "prefix_cache_hit_rate", "spec_decode_accept_rate",
 ]
@@ -262,6 +263,8 @@ METRIC_PATTERNS = {
     'mean_itl': r"[Mm]ean\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     'median_itl': r"[Mm]edian\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     'p99_itl': r"P99\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
+    # 逐 token 端到端延迟均值(bench serve 未打印时为 inf 兜底,写入 CSV 转空串)
+    'mean_e2el': r"[Mm]ean\s+E2EL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     # 部分厂商 fork 的 vllm bench serve 在结果里直接打印本次测试的投机采样接受率(百分数)
     'spec_accept_rate': r"[Aa]cceptance\s+[Rr]ate\s*\(%\)\s*:\s*(\d+(?:\.\d+)?)",
 }

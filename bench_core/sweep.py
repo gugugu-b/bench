@@ -5,6 +5,7 @@
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -80,6 +81,8 @@ def point_metrics_row(dataset: str, input_len: int, output_len: int, point: Poin
         m['mean_ttft'], m['mean_tpot'],
         m['output_token_throughput'], m['total_token_throughput'],
         m['benchmark_duration'],
+        # 逐 token 端到端延迟均值;bench serve 未打印该指标时为 inf 兜底,留空
+        m['mean_e2el'] if math.isfinite(m['mean_e2el']) else '',
         m['output_token_throughput'] / point.concurrency,
         # 单并发 decode 吞吐 = 1000/平均TPOT(ms),单条请求流的 decode 速率
         (1000 / m['mean_tpot']) if m['mean_tpot'] > 0 else 0.0,
