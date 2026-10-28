@@ -85,17 +85,12 @@ _SGLANG_SPEC_ACCEPT_RATE_KEY = "sglang:spec_accept_rate"
 _SGLANG_SPEC_ACCEPT_LENGTH_KEY = "sglang:spec_accept_length"
 
 
-def scrape_prometheus_metrics(host: str, port: int, path: str = "/metrics",
-                              timeout: float = 5.0) -> dict:
-    """GET http://host:port/path 并解析 Prometheus 文本格式,返回 {指标名: [(labels, 数值)...]}。
+def parse_prometheus_text(text: str) -> dict:
+    """解析 Prometheus 文本格式,返回 {指标名: [(labels, 数值)...]}。
 
     同名多条序列(不同 label,如多 dp_rank)保留全部样本与 label,由调用方按指标语义
-    聚合(计数器求和 / Gauge 取平均 / 按 dp_rank 配对);注释行跳过;
-    网络错误原样抛出,由调用方处理。
+    聚合(计数器求和 / Gauge 取平均 / 按 dp_rank 配对);注释行跳过。
     """
-    url = f"http://{host}:{port}{path}"
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        text = resp.read().decode("utf-8", errors="replace")
     values = {}
     for line in text.splitlines():
         line = line.strip()
@@ -114,6 +109,15 @@ def scrape_prometheus_metrics(host: str, port: int, path: str = "/metrics",
         except ValueError:
             continue
     return values
+
+
+def scrape_prometheus_metrics(host: str, port: int, path: str = "/metrics",
+                              timeout: float = 5.0) -> dict:
+    """GET http://host:port/path 并解析 Prometheus 文本格式;网络错误原样抛出,由调用方处理。"""
+    url = f"http://{host}:{port}{path}"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    return parse_prometheus_text(text)
 
 
 def _resolve_counter_key(snapshot: dict, key: str):
@@ -165,8 +169,8 @@ def _rank_values(snapshot: dict, key: str) -> dict:
 
 
 def _detect_backend(snapshot: dict) -> str:
-    """按指标名前缀识别推理后端: 'vllm' / 'sglang' / ''(未知)。"""
-    for key in snapshot:
+    """按指标名前缀识别推理后端: 'vllm' / 'sglang' / ''(未知或无快照)。"""
+    for key in snapshot or ():
         if key.startswith("vllm:"):
             return "vllm"
         if key.startswith("sglang:"):
@@ -242,41 +246,58 @@ def _sglang_cache_hit_rate(before: dict, after: dict):
     return round(max(0.0, min(hit, 1.0)) * 100, 2)
 
 
-def _sglang_spec_accept_rate(after: dict):
-    """SGLang 投机采样接受率(百分数),取测试后快照的服务端 Gauge。
+def _sglang_spec_rate_value(snapshot: dict):
+    """单快照的 spec_accept_rate 均值(保持原始量纲);无该指标返回 None。
 
     多 dp_rank 部署按 dp_rank 配对 spec_accept_length:
     accept_length 经过任何投机批次必然 ≥ 1,length=0 的 rank 视为空闲,
     其 0 值 rate 不参与平均;无法配对时退回全部序列算术平均。
-    值 ≤ 1 视为 0-1 比率换算百分数,> 1 视为已是百分数。
     """
-    if not after or _SGLANG_SPEC_ACCEPT_RATE_KEY not in after:
-        return ""
-    rates = _rank_values(after, _SGLANG_SPEC_ACCEPT_RATE_KEY)
-    lengths = _rank_values(after, _SGLANG_SPEC_ACCEPT_LENGTH_KEY)
+    if not snapshot or _SGLANG_SPEC_ACCEPT_RATE_KEY not in snapshot:
+        return None
+    rates = _rank_values(snapshot, _SGLANG_SPEC_ACCEPT_RATE_KEY)
+    lengths = _rank_values(snapshot, _SGLANG_SPEC_ACCEPT_LENGTH_KEY)
     active = {r: v for r, v in rates.items() if lengths.get(r, 1) > 0}
     values = list((active or rates).values())
-    mean = sum(values) / len(values)
-    if 0 < mean <= 1:
-        mean *= 100
-    return round(mean, 2)
+    return sum(values) / len(values)
 
 
-def _compute_sglang_rates(before: dict, after: dict):
-    return _sglang_cache_hit_rate(before, after), _sglang_spec_accept_rate(after)
+def _sglang_spec_accept_rate(snapshots) -> str:
+    """SGLang 投机采样接受率(百分数),取测试期间定时采集快照的平均值。
+
+    sglang:spec_accept_rate 为服务端短窗口 Gauge:测试结束后的单次快照只反映
+    排空尾部若干批次的瞬时值(贪心采样下常退化为 1.0 即 100%),不可靠;
+    优先对测试进行中的多次采样取平均,无有效采样时退回单次测试后快照。
+    snapshots 传快照 list(定时采样)或单个快照 dict(退回口径);
+    值 ≤ 1 视为 0-1 比率换算百分数,> 1 视为已是百分数。
+    """
+    if isinstance(snapshots, dict):
+        snapshots = [snapshots]
+    values = []
+    for snap in snapshots:
+        rate = _sglang_spec_rate_value(snap)
+        if rate is None:
+            continue
+        values.append(rate * 100 if 0 < rate <= 1 else rate)
+    if not values:
+        return ""
+    return round(sum(values) / len(values), 2)
 
 
-def compute_metrics_rates(before: dict, after: dict):
-    """用两次 /metrics 快照计算 prefix cache 命中率与投机采样接受率(百分数)。
+def compute_metrics_rates(before: dict, after: dict, spec_snapshots=None):
+    """用 /metrics 快照计算 prefix cache 命中率与投机采样接受率(百分数)。
 
     按指标前缀自动识别后端:
     - vLLM: hits/queries 与 spec accepted/draft 计数器差值
     - SGLang: cached_tokens_total/prompt_tokens_total 计数器差值(token 级命中率);
-      spec_accept_rate 取测试后 Gauge 快照值
+      spec_accept_rate 取 spec_snapshots(测试期间定时采样快照)的平均值,
+      无采样时退回 after 单次快照
     快照缺失、指标不存在或分母为 0 时对应值为空串(表示不可用)。
     """
     if not after:
         return "", ""
     if _detect_backend(after) == "sglang":
-        return _compute_sglang_rates(before, after)
+        cache_rate = _sglang_cache_hit_rate(before, after)
+        spec_rate = _sglang_spec_accept_rate(spec_snapshots or after)
+        return cache_rate, spec_rate
     return _compute_vllm_rates(before, after)

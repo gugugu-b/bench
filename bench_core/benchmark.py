@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import subprocess
+import threading
 import time
 from typing import Tuple
 
@@ -27,6 +28,7 @@ from .config import (
     PREFIX_REPETITION_DATASET_NAME,
     RETRY_SLEEP,
     SERVED_MODEL_NAME,
+    SPEC_RATE_SAMPLE_INTERVAL,
     SUBPROCESS_TIMEOUT,
     SWEEP_HEADERS,
     TEMPERATURE,
@@ -38,6 +40,7 @@ from .config import (
 )
 from .csv_io import write_to_csv
 from .metrics import (
+    _detect_backend,
     _extract_all_metrics,
     compute_metrics_rates,
     scrape_prometheus_metrics,
@@ -74,6 +77,34 @@ def _scrape_metrics_snapshot():
             )
             _metrics_scrape_warned = True
         return None
+
+
+def _start_spec_rate_sampler():
+    """启动 SGLang spec_accept_rate 后台采样线程,返回 {'stop', 'samples', 'thread'}。
+
+    sglang:spec_accept_rate 为服务端短窗口 Gauge,测试结束排空阶段会退化为
+    尾部请求的瞬时值(贪心采样下常读 1.0 即 100%),必须在测试进行中
+    定时采样取平均;第一个采样点延后一个间隔,跳过测试启动初期的 prefill 阶段。
+    """
+    stop_event = threading.Event()
+    samples = []
+
+    def _sample_loop():
+        while not stop_event.wait(SPEC_RATE_SAMPLE_INTERVAL):
+            snapshot = _scrape_metrics_snapshot()
+            if snapshot:
+                samples.append(snapshot)
+
+    thread = threading.Thread(target=_sample_loop, daemon=True)
+    thread.start()
+    return {'stop': stop_event, 'samples': samples, 'thread': thread}
+
+
+def _stop_spec_rate_sampler(sampler):
+    """停止采样线程,返回已采集的快照列表。"""
+    sampler['stop'].set()
+    sampler['thread'].join(timeout=SPEC_RATE_SAMPLE_INTERVAL + METRICS_SCRAPE_TIMEOUT)
+    return sampler['samples']
 
 
 def reset_bench_error_counter():
@@ -249,18 +280,27 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
 def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompts, dataset,
                              vllm_bench_result_file_name, sweep_results_file_name,
                              ttft_max, tpot_max, context_suffix):
-    """正式测试:前后各抓一次 /metrics,差值算 prefix cache 命中率与投机采样接受率,注入 metrics。"""
+    """正式测试:前后各抓一次 /metrics 算 prefix cache 命中率;SGLang 后端另在
+    测试进行中定时采样 spec_accept_rate 快照取平均(该 Gauge 为短窗口值,
+    测试后单次快照会退化为排空尾部的瞬时值),一并注入 metrics。"""
     before = _scrape_metrics_snapshot()
-    ttft, tpot, metrics = _execute_test(
-        cmd, input_len, output_len, concurrency, num_prompts, dataset,
-        vllm_bench_result_file_name, sweep_results_file_name,
-        ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
-    )
+    sampler = _start_spec_rate_sampler() if _detect_backend(before) == "sglang" else None
+    try:
+        ttft, tpot, metrics = _execute_test(
+            cmd, input_len, output_len, concurrency, num_prompts, dataset,
+            vllm_bench_result_file_name, sweep_results_file_name,
+            ttft_max, tpot_max, is_warmup=False, context_suffix=context_suffix,
+        )
+    finally:
+        spec_snapshots = _stop_spec_rate_sampler(sampler) if sampler else None
     if metrics:
-        cache_rate, spec_rate = compute_metrics_rates(before, _scrape_metrics_snapshot())
+        cache_rate, spec_rate = compute_metrics_rates(
+            before, _scrape_metrics_snapshot(), spec_snapshots,
+        )
         metrics['prefix_cache_hit_rate'] = cache_rate
         # fork 版 bench serve 直接打印的本次测试接受率优先于 /metrics 差值
-        # (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径)
+        # (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径;
+        # fork 的 bench serve 对 SGLang 后端不打印该项,此优先级仅对 vLLM 生效)
         bench_rate = metrics.get('spec_accept_rate', float('inf'))
         if math.isfinite(bench_rate):
             spec_rate = round(bench_rate, 2)

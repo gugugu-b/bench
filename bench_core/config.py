@@ -9,7 +9,7 @@ import time
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.3.3"
+VERSION = "v1.3.4"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
@@ -196,6 +196,9 @@ POST_TEST_SLEEP = 2             # 单次测试后等待(秒)
 ENABLE_METRICS_SCRAPE = True    # 是否抓取 /metrics
 METRICS_SCRAPE_PATH = "/metrics"  # 抓取路径
 METRICS_SCRAPE_TIMEOUT = 5      # 抓取超时(秒)
+# SGLang spec_accept_rate 为短窗口服务端 Gauge,须在正式测试进行中按该间隔(秒)
+# 定时采样取平均;测试结束排空阶段的单次快照会退化为尾部瞬时值(不可靠)
+SPEC_RATE_SAMPLE_INTERVAL = 5   # SGLang 投机采样接受率采样间隔(秒)
 RETRY_SLEEP = 2                 # 失败重试间隔(秒)
 
 # ============================================================
@@ -224,7 +227,8 @@ SWEEP_HEADERS = [
 # pc_ratio / num_prefixes 为该用例的前缀重复参数(random 数据集下不参与命令,仅作标识)
 # output_throughput_per_concurrency = output_token_throughput / concurrency
 # decode_throughput_per_concurrency = 1000 / mean_tpot,即单条请求流的 decode 速率(tok/s)
-# prefix_cache_hit_rate / spec_decode_accept_rate 来自 /metrics 正式测试前后快照差值(百分数,不可用为空)
+# prefix_cache_hit_rate / spec_decode_accept_rate 来自 /metrics(百分数,不可用为空):
+# vLLM 为正式测试前后快照差值;SGLang 接受率为测试中定时采样的 Gauge 均值
 # mean_e2el = 逐 token 端到端延迟均值(ms),bench serve 未打印该指标时留空
 POINT_METRICS_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "pc_ratio", "num_prefixes",
