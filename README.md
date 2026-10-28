@@ -58,7 +58,7 @@ python run.py
 | `PREFIX_REPETITION_PC_RATIO` 等                       | 前缀重复数据集全局默认参数（前缀占比 / 前缀数），可在`IO` 用例里用 `pc_ratio` / `num_prefixes` 按用例覆盖                                                             | `0.9` / `1`                           |
 | `ENABLE_DOUBLE_RUN`                                   | 是否开启预热：正式测试前先用相同命令预热若干轮                                                                                                                              | `True`                                  |
 | `WARMUP_ROUNDS` | 预热轮数（`ENABLE_DOUBLE_RUN=True` 时生效）；int 为所有数据集统一轮数，dict 按数据集指定（如 `{"random": 1, "prefix_repetition": 4}`）；用例级 `warmup_rounds` 可覆盖 | `{"random": 1, "prefix_repetition": 1}` |
-| `ENABLE_METRICS_SCRAPE` 等 | 是否从被测服务 `/metrics`（Prometheus）抓取指标，计算 prefix cache 命中率与投机采样接受率；`METRICS_SCRAPE_PATH` / `METRICS_SCRAPE_TIMEOUT` 控制路径与超时。**服务端要求**：vLLM 默认与 API 同端口暴露（需 `--enable-prefix-caching` 才有 cache 数据）；SGLang 需启动时加 `--enable-metrics` | `True` / `/metrics` / `5` |
+| `ENABLE_METRICS_SCRAPE` 等 | 是否从被测服务 `/metrics`（Prometheus）抓取指标，计算 prefix cache 命中率与投机采样接受率；`METRICS_SCRAPE_PATH` / `METRICS_SCRAPE_TIMEOUT` 控制路径与超时，`SPEC_RATE_SAMPLE_INTERVAL` 控制 SGLang 接受率测试中采样间隔（短窗口 Gauge，须稳态期间多次采样取平均）。**服务端要求**：vLLM 默认与 API 同端口暴露（需 `--enable-prefix-caching` 才有 cache 数据）；SGLang 需启动时加 `--enable-metrics` | `True` / `/metrics` / `5` / `5` |
 | `MAX_RETRIES` / `BENCH_MAX_ERRORS`                  | 失败重试次数 / 连续失败上限                                                                                                                                                 | `2` / `3`                             |
 | `SUBPROCESS_TIMEOUT`                                  | 单次子进程超时（秒）                                                                                                                                                        | `3600`                                  |
 | `PERF_LOG_DIR`                                        | perf_log 输出目录                                                                                                                                                           | `./bench/perf_log`                      |
@@ -135,8 +135,11 @@ bench/
     （SGLang 语义： uncached = prompt − cached；prompt 计数器缺失时分母用
     `sglang:prompt_tokens_histogram_sum`；不使用按 prefill 批次覆盖的
     `sglang:cache_hit_rate` Gauge）；
-    `spec_decode_accept_rate` 取测试后快照的 `sglang:spec_accept_rate`
-    （SGLang 未暴露接受 token 计数器，该值为服务端 Gauge 而非本次测试差值）；
+    `spec_decode_accept_rate` 取正式测试**进行中**按 `SPEC_RATE_SAMPLE_INTERVAL`
+    （默认 5 秒）定时采样的 `sglang:spec_accept_rate` Gauge 平均值
+    （SGLang 未暴露接受 token 计数器，只能取服务端 Gauge；该 Gauge 为短窗口值，
+    测试结束后的单次快照在请求排空阶段会退化为尾部瞬时值——贪心采样下常读
+    100%，故须稳态期间多次采样取平均；无有效采样时退回测试后单次快照）；
     多 dp_rank 部署按 dp_rank 配对 `sglang:spec_accept_length`——
     accept_length 经过任何投机批次必然 ≥ 1，length = 0 的 rank 视为空闲，
     其 0 值 rate 不参与平均；无法配对时退回全部序列算术平均；
@@ -170,4 +173,4 @@ bench/
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.3**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.3.4**。

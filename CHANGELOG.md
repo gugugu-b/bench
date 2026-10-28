@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.3.4
+
+- 修复：SGLang 后端 `spec_decode_accept_rate` 失真——实测记录 100% / 59.77%，
+  而服务端稳态真实值约 93%~95%。根因：`sglang:spec_accept_rate` 是服务端
+  **短窗口 Gauge**，原实现在正式测试结束后单次抓取，此时请求已排空，读数退化为
+  尾部若干批次的瞬时值——贪心采样（`--temperature 0`）下尾部批次几乎全接受，
+  Gauge 读数 1.0，即记录为 100%。现为 SGLang 后端在正式测试**进行中**按
+  `SPEC_RATE_SAMPLE_INTERVAL`（`config.py` 新增，默认 5 秒）后台定时采样该
+  Gauge 并取平均，无有效采样时退回原单次快照口径；首个采样点延后一个间隔，
+  跳过测试初期的 prefill 阶段。vLLM 后端口径不变（计数器差值 + bench serve
+  打印值优先；fork 的 bench serve 对 SGLang 后端不打印 `Acceptance rate (%)`，
+  该优先级对 SGLang 无影响）。
+
 ## v1.3.3
 
 - **`import_all_perf.csv` / `point_metrics` 新增 `mean_e2el` 列**：逐 token 端到端
