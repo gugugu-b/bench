@@ -4,19 +4,30 @@
 """
 
 import math
-import time
+import sys
+from datetime import datetime
 
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.3.4"
+VERSION = "v1.4.0"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
 # ============================================================
 HOST = "0.0.0.0"
 PORT = "30000"
-BACKEND = "vllm"
+BACKEND = "vllm"                  # vLLM bench 的请求协议,不是压测工具选择
+BENCH_TOOL = "vllm"               # 压测工具: vllm / sglang
+AUTO_SELECT_BENCH = False          # 开启后按服务端类型选择同名工具;识别失败回退 BENCH_TOOL
+BENCH_DETECT_TIMEOUT = 3           # 单个只读识别请求的超时(秒),与指标抓取开关独立
+SGLANG_PYTHON = sys.executable      # SGLang 所在 Python,可指定另一环境的绝对路径
+SGLANG_BENCH_MODULE = "sglang.bench_serving"  # 也可改为 sglang.benchmark.serving
+SGLANG_BACKEND = "sglang"          # SGLang bench 的请求协议(原生 /generate)
+# 服务端 /server_info 的投机参数优先;读取不到时用这里的手工配置换算 Accept length。
+# 对当前 EAGLE / steps=3 / topk=1 / draft-tokens=4: 接受率=(length-1)/3。
+SGLANG_SPECULATIVE_NUM_DRAFT_TOKENS = 4
+SGLANG_SPECULATIVE_NUM_STEPS = 3
 SERVED_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"
 MODEL = "/data/model/DeepSeek-V4-Flash-Channel-FP8-w8a8"
 IGNORE_EOS = "--ignore-eos"
@@ -27,7 +38,8 @@ PERCENTILE_METRICS = "ttft,tpot,itl,e2el"  # --percentile-metrics,e2el 为端到
 PERF_LOG_DIR = "./bench/perf_log"
 PERF_MODEL_NAME = "DeepSeek-V4-Flash-Channel-FP8-w8a8"  # 与 SERVED_MODEL_NAME 一致
 
-# 数据集模式: 支持 "random" / "prefix_repetition",可填多个,按顺序各跑一遍
+# 数据集模式: random / prefix_repetition;SGLang 分别映射为 random-ids / generated-shared-prefix
+# 也支持直接填写 random-ids / generated-shared-prefix,切换工具时按场景映射
 # 用例可用 datasets 字段指定自己要跑的数据集列表,不填的用例用这里的全局默认
 DATASET_MODES = ["random", "prefix_repetition"]
 
@@ -120,7 +132,7 @@ def prefix_context_tag(dataset: str, pc_ratio: float, num_prefixes: int) -> str:
     输入输出相同但前缀参数不同的用例,靠该后缀区分 context 目录与汇总表行;
     random 等其他数据集返回空串。
     """
-    if dataset != PREFIX_REPETITION_DATASET_NAME:
+    if not is_prefix_dataset(dataset):
         return ""
     return f"_pc{pc_ratio:g}_np{num_prefixes}"
 
@@ -131,9 +143,13 @@ def dataset_prefix_fields(dataset: str, pc_ratio: float, num_prefixes: int):
     仅 prefix_repetition 数据集有意义,返回原值;random 等其他数据集返回空串,
     避免把「未参与测试的回退默认值」误记为有效配置。
     """
-    if dataset != PREFIX_REPETITION_DATASET_NAME:
+    if not is_prefix_dataset(dataset):
         return "", ""
     return pc_ratio, num_prefixes
+
+
+def is_prefix_dataset(dataset: str) -> bool:
+    return dataset in (PREFIX_REPETITION_DATASET_NAME, "generated-shared-prefix")
 
 
 def resolve_warmup_rounds(case_rounds, dataset: str) -> int:
@@ -149,16 +165,23 @@ def resolve_warmup_rounds(case_rounds, dataset: str) -> int:
         if isinstance(cfg, dict):
             if dataset in cfg:
                 return int(cfg[dataset])
+            alias = {
+                "random": "random-ids", "random-ids": "random",
+                "prefix_repetition": "generated-shared-prefix",
+                "generated-shared-prefix": "prefix_repetition",
+            }.get(dataset)
+            if alias in cfg:
+                return int(cfg[alias])
         else:
             return int(cfg)
     return 1
 
 
-# 脚本启动时间戳(模块加载时计算一次,全包共享)
-SCRIPT_START_TIME = time.strftime("%H%M%S")
-SCRIPT_START_DATE = time.strftime("%Y%m%d")
-# 单次执行完整时间戳(YYYYMMDD_HHMMSS):bench/log 按此分目录,同一天多次执行互不覆盖
-SCRIPT_START_STAMP = f"{SCRIPT_START_DATE}_{SCRIPT_START_TIME}"
+# 脚本启动时间戳(模块加载时取同一个时刻,全包共享);微秒避免同秒启动的运行重名。
+_SCRIPT_STARTED_AT = datetime.now()
+SCRIPT_START_TIME = _SCRIPT_STARTED_AT.strftime("%H%M%S")
+SCRIPT_START_DATE = _SCRIPT_STARTED_AT.strftime("%Y%m%d")
+SCRIPT_START_STAMP = _SCRIPT_STARTED_AT.strftime("%Y%m%d_%H%M%S_%f")
 
 # TTFT/TPOT 标签:可选 "Mean TTFT" / "Median TTFT" / "P99 TTFT" 等
 TTFT_LABEL = "Mean TTFT"
@@ -213,9 +236,12 @@ _METRIC_COLUMNS = [
     "mean_itl", "median_itl", "p99_itl",
 ]
 
+RUN_METADATA_HEADERS = ["bench_tool", "server_engine", "actual_dataset"]
+BENCH_METADATA_HEADERS = RUN_METADATA_HEADERS + ["spec_accept_length", "spec_rate_source"]
+
 VLLM_BENCH_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "num_prompts",
-] + _METRIC_COLUMNS
+] + _METRIC_COLUMNS + BENCH_METADATA_HEADERS
 
 # 每个并发点一行,passed=1 表示该点同时满足 TTFT/TPOT 阈值
 SWEEP_HEADERS = [
@@ -227,8 +253,7 @@ SWEEP_HEADERS = [
 # pc_ratio / num_prefixes 为该用例的前缀重复参数(random 数据集下不参与命令,仅作标识)
 # output_throughput_per_concurrency = output_token_throughput / concurrency
 # decode_throughput_per_concurrency = 1000 / mean_tpot,即单条请求流的 decode 速率(tok/s)
-# prefix_cache_hit_rate / spec_decode_accept_rate 来自 /metrics(百分数,不可用为空):
-# vLLM 为正式测试前后快照差值;SGLang 接受率为测试中定时采样的 Gauge 均值
+# spec_decode_accept_rate 优先 bench 日志,无可用值时回退 /metrics(百分数,不可用为空)
 # mean_e2el = 逐 token 端到端延迟均值(ms),bench serve 未打印该指标时留空
 POINT_METRICS_HEADERS = [
     "dataset", "input_len", "output_len", "concurrency", "pc_ratio", "num_prefixes",
@@ -236,19 +261,19 @@ POINT_METRICS_HEADERS = [
     "output_token_throughput", "total_token_throughput", "benchmark_duration", "mean_e2el",
     "output_throughput_per_concurrency", "decode_throughput_per_concurrency",
     "prefix_cache_hit_rate", "spec_decode_accept_rate",
-]
+] + BENCH_METADATA_HEADERS
 
 SUMMARY_HEADERS = [
     "dataset", "input_len", "output_len", "pc_ratio", "num_prefixes", "num_prompts_ratio",
     "ttft_threshold", "tpot_threshold",
     "best_concurrency", "ttft", "tpot",
     "points_total", "points_passed",
-]
+] + RUN_METADATA_HEADERS
 
 BEST_METRICS_HEADERS = [
     "dataset", "input_len", "output_len", "pc_ratio", "num_prefixes",
     "concurrency", "num_prompts",
-] + _METRIC_COLUMNS
+] + _METRIC_COLUMNS + RUN_METADATA_HEADERS
 
 # 指标正则:每个指标一个独立命名组,内层再命名一个数值捕获组
 METRIC_PATTERNS = {
@@ -269,10 +294,13 @@ METRIC_PATTERNS = {
     'median_itl': r"[Mm]edian\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     'p99_itl': r"P99\s+ITL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     # 逐 token 端到端延迟均值(bench serve 未打印时为 inf 兜底,写入 CSV 转空串)
-    'mean_e2el': r"[Mm]ean\s+E2EL\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
+    'mean_e2el': r"[Mm]ean\s+(?:E2EL|E2E\s+[Ll]atency)\s*\(ms\)?:\s*(\d+(?:\.\d+)?)",
     # 部分厂商 fork 的 vllm bench serve 在结果里直接打印本次测试的投机采样接受率(百分数)
     'spec_accept_rate': r"[Aa]cceptance\s+[Rr]ate\s*\(%\)\s*:\s*(\d+(?:\.\d+)?)",
+    'spec_accept_length': r"[Aa]ccept\s+[Ll]ength\s*:\s*(\d+(?:\.\d+)?)",
 }
+# 每行从指标名开始匹配,不把 Peak/retokenized 等同名后缀指标当作正式指标。
+METRIC_PATTERNS = {key: r"^[ \t]*" + pattern for key, pattern in METRIC_PATTERNS.items()}
 
 INT_METRIC_KEYS = frozenset({'successful_requests', 'total_input_tokens', 'total_generated_tokens'})
 

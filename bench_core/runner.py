@@ -3,22 +3,26 @@
 import csv
 import logging
 import os
+import tempfile
 import time
 
-from .benchmark import reset_bench_error_counter
+from .benchmark import initialize_bench_runtime, reset_bench_error_counter
+from .bench_tools import actual_dataset, build_bench_command
 from .config import (
     BEST_METRICS_HEADERS,
     ENABLE_DOUBLE_RUN,
     IO,
     POINT_METRICS_HEADERS,
+    RUN_METADATA_HEADERS,
     SCRIPT_START_STAMP,
     SUMMARY_HEADERS,
     VERSION,
+    compute_num_prompts,
     dataset_prefix_fields,
     resolve_case,
     resolve_warmup_rounds,
 )
-from .csv_io import get_base_filename, write_to_csv
+from .csv_io import get_base_filename
 from .metrics import reset_warnings
 from .sweep import point_metrics_row, run_concurrency_sweep
 
@@ -60,18 +64,61 @@ def _write_best_metrics_csv(summary_results):
                 row["dataset"], row["input_len"], row["output_len"],
                 row["pc_ratio"], row["num_prefixes"],
                 row["best_concurrency"], row["best_num_prompts"],
-            ] + [metrics.get(k, 0) for k in _METRIC_KEYS])
+            ] + [metrics.get(k, 0) for k in _METRIC_KEYS]
+            + [row.get(k, '') for k in RUN_METADATA_HEADERS])
     logging.info(f"最优指标CSV已写入: {best_metrics_file}")
 
 
+def _prepare_all_perf_csv(out_file):
+    """只创建一次表头;旧版仅缺少末尾列时补空列,保留已有历史记录。"""
+    try:
+        existing = open(out_file, 'r', newline='', encoding='utf-8-sig')
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        with existing:
+            reader = csv.reader(existing)
+            old_headers = next(reader, None)
+            if old_headers == POINT_METRICS_HEADERS:
+                return
+            if old_headers:
+                if old_headers != POINT_METRICS_HEADERS[:len(old_headers)]:
+                    raise ValueError(f"{out_file} 的表头与当前指标列不兼容,历史文件未修改")
+                temporary_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode='w', newline='', encoding='utf-8',
+                        dir=os.path.dirname(out_file), prefix='.import_all_perf-',
+                        suffix='.csv', delete=False,
+                    ) as temporary:
+                        temporary_path = temporary.name
+                        writer = csv.writer(temporary)
+                        writer.writerow(POINT_METRICS_HEADERS)
+                        for row in reader:
+                            if not row:
+                                continue
+                            if len(row) != len(old_headers):
+                                raise ValueError(f"{out_file} 存在列数不一致的历史记录,历史文件未修改")
+                            writer.writerow(row + [''] * (len(POINT_METRICS_HEADERS) - len(old_headers)))
+                    os.replace(temporary_path, out_file)
+                    temporary_path = None
+                finally:
+                    if temporary_path is not None:
+                        os.unlink(temporary_path)
+                return
+    # 新文件或已有空文件只写一次表头,以后均追加数据。
+    with open(out_file, 'a', newline='', encoding='utf-8') as stream:
+        csv.writer(stream).writerow(POINT_METRICS_HEADERS)
+
+
 def _write_all_perf_csv(sweeps):
-    """把本次运行所有场景的逐并发点关键性能指标汇总成一张表,写到 bench/import_all_perf.csv。"""
+    """把本次运行所有场景的成功测试点追加到跨次汇总表,保留既有历史。"""
     out_dir = os.path.join(os.getcwd(), "bench")
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "import_all_perf.csv")
-    with open(out_file, 'w', newline='', encoding='utf-8') as f:
+    _prepare_all_perf_csv(out_file)
+    with open(out_file, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(POINT_METRICS_HEADERS)
         for sweep in sweeps:
             for p in sweep.points:
                 if not p.failed:
@@ -81,17 +128,28 @@ def _write_all_perf_csv(sweeps):
                             sweep.pc_ratio, sweep.num_prefixes,
                         )
                     )
-    logging.info(f"全场景性能汇总CSV已写入: {out_file}")
+    logging.info(f"本次全场景性能数据已追加到: {out_file}")
 
 
 def run_test_cases():
     """遍历「用例 × 数据集」执行固定并发点扫描,并写汇总 CSV。"""
-    logging.info(f"[{VERSION}] 开始 vllm benchmark 固定并发点扫描")
+    logging.info(f"[{VERSION}] 开始 benchmark 固定并发点扫描")
     start_time = time.time()
     summary_results = []
     sweeps = []
 
     cases = [resolve_case(c) for c in IO]
+    runtime = initialize_bench_runtime()
+    # 提前校验所有命令参数,避免未知数据集/GSP 组数等配置错误跑到中途才发现。
+    for case in cases:
+        for dataset in case['datasets']:
+            actual_dataset(dataset, runtime.tool)
+            for concurrency in dict.fromkeys(case['concurrency']):
+                build_bench_command(
+                    runtime, case['input_len'], case['output_len'], concurrency, dataset,
+                    compute_num_prompts(concurrency, case['num_prompts_ratio']),
+                    case['pc_ratio'], case['num_prefixes'],
+                )
     total = sum(len(c["datasets"]) for c in cases)
     idx = 0
 
@@ -121,7 +179,7 @@ def run_test_cases():
             reset_warnings()
 
             result_csv = get_base_filename(
-                "vllm_bench_result", input_len, output_len, ttft_max, tpot_max, dataset
+                f"{runtime.tool}_bench_result", input_len, output_len, ttft_max, tpot_max, dataset
             )
             sweep_csv = get_base_filename(
                 "sweep_results", input_len, output_len, ttft_max, tpot_max, dataset
@@ -171,6 +229,13 @@ def run_test_cases():
                 "points_passed": sweep.passed_count,
                 "best_num_prompts": best_np,
                 "metrics": metrics,
+                "bench_tool": runtime.tool,
+                "server_engine": (
+                    metrics.get('server_engine') or runtime.server_engine
+                    or next((p.metrics.get('server_engine') for p in sweep.points
+                             if p.metrics.get('server_engine')), '')
+                ),
+                "actual_dataset": actual_dataset(dataset, runtime.tool),
             })
 
     total_time = int(time.time() - start_time)

@@ -1,10 +1,12 @@
-"""指标提取 - 从 vllm bench serve 输出中逐项正则提取所有指标;
+"""指标提取 - 从 vLLM / SGLang bench 输出中逐项提取指标;
 并从被测服务 /metrics 抓取 Prometheus 快照,计算 prefix cache 命中率与投机采样接受率。"""
 
 import logging
+import math
 import re
 import urllib.request
 
+from . import config
 from .config import (
     INT_METRIC_KEYS,
     METRIC_PATTERNS,
@@ -23,15 +25,24 @@ def reset_warnings():
 
 # 预编译每个 metric 的独立正则,避免每次提取都重新编译
 _COMPILED_METRIC_PATTERNS = {
-    key: re.compile(pat) for key, pat in METRIC_PATTERNS.items()
+    key: re.compile(pat, re.MULTILINE) for key, pat in METRIC_PATTERNS.items()
 }
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_RESULT_HEADER_RE = re.compile(
+    r"^[ \t]*=+[ \t]*Serving Benchmark Result[ \t]*=+[ \t]*\r?$", re.MULTILINE
+)
 
 
 def _extract_all_metrics(output_str: str) -> dict:
     """逐项正则提取所有指标。
 
-    未命中的指标:整数用 0、浮点用 inf 兜底。
+    只解析最后一份正式结果表,避免 GSP 数据准备统计或其他结果污染。
+    无结果标题的旧日志仍解析全文。未命中的指标:整数用 0、浮点用 inf 兜底。
     """
+    output_str = _ANSI_ESCAPE_RE.sub("", output_str)
+    headers = list(_RESULT_HEADER_RE.finditer(output_str))
+    if headers:
+        output_str = output_str[headers[-1].end():]
     metrics = {key: 0 for key in INT_METRIC_KEYS}
     metrics.update({key: float('inf') for key in METRIC_PATTERNS if key not in INT_METRIC_KEYS})
 
@@ -65,6 +76,80 @@ def select_ttft(metrics: dict, label: str) -> float:
 
 def select_tpot(metrics: dict, label: str) -> float:
     return select_metric(metrics, label, TPOT_KEY_MAP)
+
+
+def _finite_number(value):
+    """读日志/JSON 数值;缺失、布尔值及非有限数值都不参与换算。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _spec_server_config(server_info):
+    """统一普通服务、server_args 嵌套与 PD decode 服务的启动参数。"""
+    if not isinstance(server_info, dict):
+        return {}
+    info = server_info
+    decode = info.get("decode")
+    if isinstance(decode, list) and decode and isinstance(decode[0], dict):
+        info = decode[0]
+    result = dict(info)
+    if isinstance(info.get("server_args"), dict):
+        result.update(info["server_args"])
+    return result
+
+
+def select_spec_accept_rate(metrics: dict, tool: str, server_engine: str,
+                            server_info=None):
+    """优先取 bench 的接受率,其次从 SGLang bench 接受长度换算。
+
+    EAGLE 接受长度包括每轮一个非草稿 token。固定草稿数时,接受率为
+    (length - 1) / (num_draft_tokens - 1);无草稿数配置时分母使用 steps。
+    返回 (百分数, 来源);无可用日志值返回 ('', ''),由调用方回退 /metrics。
+    保留 bench 本身的统计范围,不将累计日志值声称为本轮独立统计。
+    """
+    rate = _finite_number(metrics.get('spec_accept_rate'))
+    if rate is not None and 0 <= rate <= 100:
+        return round(rate, 2), "bench_acceptance_rate"
+    if tool != "sglang" or server_engine != "sglang":
+        return "", ""
+    length = _finite_number(metrics.get('spec_accept_length'))
+    if length is None or length < 1:
+        return "", ""
+
+    server_config = _spec_server_config(server_info)
+    if "speculative_algorithm" in server_config:
+        algorithm = str(server_config["speculative_algorithm"]).upper()
+        if algorithm != "EAGLE":
+            return "", ""
+
+    draft_key = "speculative_num_draft_tokens"
+    steps_key = "speculative_num_steps"
+    if draft_key in server_config or steps_key in server_config:
+        # 服务端的参数是一组配置,不能用手工默认草稿数覆盖其 steps 口径。
+        draft_raw = server_config.get(draft_key)
+        steps_raw = server_config.get(steps_key)
+    else:
+        draft_raw = getattr(config, "SGLANG_SPECULATIVE_NUM_DRAFT_TOKENS", None)
+        steps_raw = getattr(config, "SGLANG_SPECULATIVE_NUM_STEPS", None)
+
+    if draft_raw is not None:
+        draft = _finite_number(draft_raw)
+        if draft is None or draft <= 1 or not draft.is_integer():
+            return "", ""
+        denominator = draft - 1
+    else:
+        denominator = _finite_number(steps_raw)
+        if denominator is None or denominator <= 0 or not denominator.is_integer():
+            return "", ""
+    rate = (length - 1) / denominator * 100
+    if not 0 <= rate <= 100:
+        return "", ""
+    return round(rate, 2), "bench_accept_length"
 
 
 # vLLM prefix cache 计数器候选名(新版为 gpu/cpu 前缀,旧版无前缀),按序取第一对齐全的
@@ -299,5 +384,7 @@ def compute_metrics_rates(before: dict, after: dict, spec_snapshots=None):
     if _detect_backend(after) == "sglang":
         cache_rate = _sglang_cache_hit_rate(before, after)
         spec_rate = _sglang_spec_accept_rate(spec_snapshots or after)
+        if spec_rate == "" and spec_snapshots:
+            spec_rate = _sglang_spec_accept_rate(after)
         return cache_rate, spec_rate
     return _compute_vllm_rates(before, after)

@@ -1,8 +1,13 @@
 # 本项目仅使用 Python 标准库(>=3.9),无需安装第三方包。
-# 唯一外部依赖:vllm bench serve CLI(由被测服务侧提供,不在本仓库安装)。
+# 外部压测工具由测试环境提供,不在本仓库安装:
+#   - 默认:vllm bench serve CLI。
+#   - 可选:SGLang benchmark 模块及其依赖(使用 SGLANG_PYTHON 指定的环境)。
 #
 # 标准库使用清单:
-#   - logging / re / csv / os / time / math / glob / subprocess / typing
+#   - logging / re / csv / os / sys / time / math / subprocess / threading / shlex
+#   - typing / dataclasses / urllib / json / datetime / tempfile
 #
 # 如果你的 vllm 环境自带 vllm bench serve 子命令,直接跑即可。
 # 否则参考 vLLM 官方文档安装:  https://docs.vllm.ai/en/latest/benchmarking/
+# 使用 SGLang 时按所用版本准备环境,再设置 BENCH_TOOL="sglang"。
+# SGLang 自身的 Python 版本要求与第三方依赖不由本文件管理。

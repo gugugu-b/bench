@@ -1,43 +1,38 @@
-"""Benchmark 执行 - 调用 vllm bench serve 子进程,提取指标,写 CSV/perf_log。"""
+"""Benchmark 执行 - 调用选定的压测工具,提取指标,写 CSV/perf_log。"""
 
 import logging
 import math
 import os
+import shlex
 import subprocess
 import threading
 import time
 from typing import Tuple
 
 from .config import (
-    BACKEND,
     BENCH_MAX_ERRORS,
-    DATASET_NAME,
     ENABLE_DOUBLE_RUN,
     ENABLE_METRICS_SCRAPE,
     HOST,
-    IGNORE_EOS,
     MAX_RETRIES,
     METRICS_SCRAPE_PATH,
     METRICS_SCRAPE_TIMEOUT,
-    MODEL,
     PERF_LOG_DIR,
     PERF_MODEL_NAME,
-    PERCENTILE_METRICS,
     PORT,
     POST_TEST_SLEEP,
-    PREFIX_REPETITION_DATASET_NAME,
     RETRY_SLEEP,
-    SERVED_MODEL_NAME,
+    SCRIPT_START_STAMP,
     SPEC_RATE_SAMPLE_INTERVAL,
     SUBPROCESS_TIMEOUT,
     SWEEP_HEADERS,
-    TEMPERATURE,
     TTFT_LABEL,
     TPOT_LABEL,
     VLLM_BENCH_HEADERS,
     compute_num_prompts,
     prefix_context_tag,
 )
+from .bench_tools import BenchRuntime, actual_dataset, build_bench_command, resolve_bench_runtime
 from .csv_io import write_to_csv
 from .metrics import (
     _detect_backend,
@@ -46,6 +41,7 @@ from .metrics import (
     scrape_prometheus_metrics,
     select_ttft,
     select_tpot,
+    select_spec_accept_rate,
 )
 
 
@@ -59,6 +55,24 @@ _bench_err_num = 0
 
 # /metrics 抓取失败是否已告警过(只告警一次,避免每个测试点刷屏)
 _metrics_scrape_warned = False
+_bench_runtime = None
+
+
+def initialize_bench_runtime(runtime: BenchRuntime = None) -> BenchRuntime:
+    """每次 run_test_cases 启动时选择一次,各并发点与重试复用同一个选择。"""
+    global _bench_runtime, _metrics_scrape_warned
+    _bench_runtime = runtime if runtime is not None else resolve_bench_runtime()
+    _metrics_scrape_warned = False
+    logging.info(
+        "压测工具=%s, 服务端=%s, 选择方式=%s",
+        _bench_runtime.tool, _bench_runtime.server_engine or "未知", _bench_runtime.selection,
+    )
+    return _bench_runtime
+
+
+def get_bench_runtime() -> BenchRuntime:
+    """也兼容直接调用单点/扫描 API 的用法。"""
+    return _bench_runtime if _bench_runtime is not None else initialize_bench_runtime()
 
 
 def _scrape_metrics_snapshot():
@@ -72,7 +86,7 @@ def _scrape_metrics_snapshot():
         if not _metrics_scrape_warned:
             logging.warning(
                 f"抓取 http://{HOST}:{PORT}{METRICS_SCRAPE_PATH} 失败: {e}; "
-                "prefix cache 命中率与投机采样接受率将留空"
+                "prefix cache 命中率与投机接受率的 metrics 回退可能不可用"
                 "(服务未暴露 /metrics 时可用 ENABLE_METRICS_SCRAPE=False 关闭抓取)"
             )
             _metrics_scrape_warned = True
@@ -114,13 +128,20 @@ def reset_bench_error_counter():
 
 
 def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_prompts: int,
-                        dataset: str, metrics: dict, raw_output: str, context_suffix: str = ""):
+                        dataset: str, metrics: dict, raw_output: str, context_suffix: str = "",
+                        cmd=None):
     """保存 perf_log 格式的日志条目(原始输出 + 提取的指标)。
 
-    目录: perf_log/<模型名>_<dataset>{context_suffix}/  文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
+    目录: perf_log/<运行时间戳>/<模型名>_<dataset>{context_suffix}[_sglang]/
+    文件名: il{input_len}_ol{output_len}_np{np}_mc{concurrency}.log
     文件名格式固定,供外部导入使用;同名用例(如不同 pc_ratio)靠目录后缀区分。
     """
-    log_dir = os.path.join(PERF_LOG_DIR, f"{PERF_MODEL_NAME}_{dataset}{context_suffix}")
+    tool = metrics.get('bench_tool') or get_bench_runtime().tool
+    tool_suffix = "_sglang" if tool == "sglang" else ""
+    log_dir = os.path.join(
+        PERF_LOG_DIR, SCRIPT_START_STAMP,
+        f"{PERF_MODEL_NAME}_{dataset}{context_suffix}{tool_suffix}",
+    )
     os.makedirs(log_dir, exist_ok=True)
     sub_log_file = os.path.join(
         log_dir, f"il{input_len}_ol{output_len}_np{num_prompts}_mc{concurrency}.log"
@@ -131,6 +152,12 @@ def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_p
         f.write(f"Concurrency: {concurrency}\n")
         f.write(f"Num Prompts: {num_prompts}\n")
         f.write(f"Dataset: {dataset}\n")
+        f.write(f"Run Stamp: {SCRIPT_START_STAMP}\n")
+        f.write(f"Bench Tool: {tool}\n")
+        f.write(f"Server Engine: {metrics.get('server_engine', '')}\n")
+        f.write(f"Actual Dataset: {metrics.get('actual_dataset', '')}\n")
+        if cmd is not None:
+            f.write(f"Command: {shlex.join(cmd)}\n")
         f.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 50 + "\n")
         f.write("Raw Benchmark Output:\n")
@@ -143,46 +170,15 @@ def save_perf_log_entry(input_len: int, output_len: int, concurrency: int, num_p
 
 def _build_bench_cmd(input_len: int, output_len: int, concurrency: int,
                      dataset: str, num_prompts: int, pc_ratio: float, num_prefixes: int):
-    """按数据集模式下发 random 或 prefix_repetition 命令。"""
-    common = [
-        "vllm", "bench", "serve",
-        "--host", HOST,
-        "--port", PORT,
-        "--backend", BACKEND,
-        "--served-model-name", SERVED_MODEL_NAME,
-        "--model", MODEL,
-        "--num-prompts", str(num_prompts),
-        "--max-concurrency", str(concurrency),
-        "--temperature", str(TEMPERATURE),
-        "--percentile-metrics", PERCENTILE_METRICS,
-    ]
-
-    if dataset == PREFIX_REPETITION_DATASET_NAME:
-        # 前缀重复模式:prefix + suffix + output 三段
-        # pc_ratio 为该用例的前缀占比(不填时回退全局 PREFIX_REPETITION_PC_RATIO)
-        # prefix 和 suffix 都向上取整(可能 prefix+suffix > input_len 1 个 token)
-        prefix_len = math.ceil(input_len * pc_ratio)
-        suffix_len = math.ceil(input_len * (1 - pc_ratio))
-        return common + [
-            "--dataset-name", PREFIX_REPETITION_DATASET_NAME,
-            "--prefix-repetition-prefix-len", str(prefix_len),
-            "--prefix-repetition-suffix-len", str(suffix_len),
-            "--prefix-repetition-output-len", str(output_len),
-            "--prefix-repetition-num-prefixes", str(num_prefixes),
-            IGNORE_EOS,
-        ]
-
-    # 默认 random 模式
-    return common + [
-        "--dataset-name", DATASET_NAME,
-        "--random-input-len", str(input_len),
-        "--random-output-len", str(output_len),
-        IGNORE_EOS,
-    ]
+    """通过工具适配层生成命令。"""
+    return build_bench_command(
+        get_bench_runtime(), input_len, output_len, concurrency,
+        dataset, num_prompts, pc_ratio, num_prefixes,
+    )
 
 
 def _run_subprocess(cmd):
-    """执行 vllm bench serve 子进程,返回 stdout。失败抛 CalledProcessError。"""
+    """执行压测子进程,返回 stdout。失败抛 CalledProcessError。"""
     result = subprocess.run(
         cmd,
         check=True,
@@ -219,53 +215,29 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
 
         if m['successful_requests'] <= 0:
             logging.error(f"  ┗━ 并发 {concurrency} 没有成功的请求,测试失败")
-            time.sleep(POST_TEST_SLEEP)
             return -1, -1, m
 
         ttft = select_ttft(m, TTFT_LABEL)
         tpot = select_tpot(m, TPOT_LABEL)
 
         if not is_warmup:
-            write_to_csv(
-                [
-                    dataset, input_len, output_len, concurrency, num_prompts,
-                    m['successful_requests'], m['benchmark_duration'],
-                    m['total_input_tokens'], m['total_generated_tokens'],
-                    m['req_throughput'], m['output_token_throughput'], m['total_token_throughput'],
-                    m['mean_ttft'], m['median_ttft'], m['p99_ttft'],
-                    m['mean_tpot'], m['median_tpot'], m['p99_tpot'],
-                    m['mean_itl'], m['median_itl'], m['p99_itl'],
-                ],
-                vllm_bench_result_file_name,
-                headers=VLLM_BENCH_HEADERS,
-                input_len=input_len,
-                output_len=output_len,
-                context_suffix=context_suffix,
-            )
+            # 正式轮在补全 metrics 回退和来源后统一落盘;原始输出不暴露给结果对象。
+            m['_raw_output'] = output
             passed = meet_requirements(ttft, tpot, ttft_max, tpot_max)
-            write_to_csv(
-                [dataset, input_len, output_len, concurrency, num_prompts, ttft, tpot, int(passed)],
-                sweep_results_file_name,
-                headers=SWEEP_HEADERS,
-                input_len=input_len,
-                output_len=output_len,
-                context_suffix=context_suffix,
-            )
             logging.info(
                 f"  ┗━ 并发 {concurrency} (np={num_prompts}, {dataset}): "
                 f"{TTFT_LABEL}={ttft}ms, {TPOT_LABEL}={tpot}ms, "
                 f"throughput={m['total_token_throughput']} tok/s"
                 + ("，达标" if passed else "，未达标")
             )
-            save_perf_log_entry(input_len, output_len, concurrency, num_prompts, dataset, m, output,
-                                context_suffix)
         else:
             logging.info(
                 f"  ┗━ 预热并发 {concurrency} (np={num_prompts}, {dataset}): "
                 f"{TTFT_LABEL}={ttft}ms, {TPOT_LABEL}={tpot}ms"
             )
 
-        time.sleep(POST_TEST_SLEEP)
+        if is_warmup:
+            time.sleep(POST_TEST_SLEEP)
         return ttft, tpot, m
     except subprocess.CalledProcessError as e:
         # stderr 已合并进 stdout,这里只能从 output 取
@@ -283,6 +255,7 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
     """正式测试:前后各抓一次 /metrics 算 prefix cache 命中率;SGLang 后端另在
     测试进行中定时采样 spec_accept_rate 快照取平均(该 Gauge 为短窗口值,
     测试后单次快照会退化为排空尾部的瞬时值),一并注入 metrics。"""
+    runtime = get_bench_runtime()
     before = _scrape_metrics_snapshot()
     sampler = _start_spec_rate_sampler() if _detect_backend(before) == "sglang" else None
     try:
@@ -293,18 +266,49 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
         )
     finally:
         spec_snapshots = _stop_spec_rate_sampler(sampler) if sampler else None
-    if metrics:
+    if metrics and ttft != -1 and tpot != -1:
+        raw_output = metrics.pop('_raw_output', '')
+        after = _scrape_metrics_snapshot()
         cache_rate, spec_rate = compute_metrics_rates(
-            before, _scrape_metrics_snapshot(), spec_snapshots,
+            before, after, spec_snapshots,
         )
         metrics['prefix_cache_hit_rate'] = cache_rate
-        # fork 版 bench serve 直接打印的本次测试接受率优先于 /metrics 差值
-        # (不受指标命名差异与其他流量污染;缺失时为 inf,回退差值口径;
-        # fork 的 bench serve 对 SGLang 后端不打印该项,此优先级仅对 vLLM 生效)
-        bench_rate = metrics.get('spec_accept_rate', float('inf'))
-        if math.isfinite(bench_rate):
-            spec_rate = round(bench_rate, 2)
+        server_engine = runtime.server_engine or _detect_backend(after) or _detect_backend(before)
+        bench_rate, source = select_spec_accept_rate(
+            metrics, runtime.tool, server_engine, runtime.server_info,
+        )
+        if bench_rate != '':
+            spec_rate = bench_rate
+        elif spec_rate != '':
+            source = 'metrics'
         metrics['spec_decode_accept_rate'] = spec_rate
+        metrics.update({
+            'bench_tool': runtime.tool,
+            'server_engine': server_engine,
+            'actual_dataset': actual_dataset(dataset, runtime.tool),
+            'spec_rate_source': source,
+        })
+        if not math.isfinite(metrics.get('spec_accept_length', float('inf'))):
+            metrics['spec_accept_length'] = ''
+
+        # 在接受率来源确定后写入 CSV 和 perf_log,确保回退值也能追溯。
+        write_to_csv(
+            [dataset, input_len, output_len, concurrency, num_prompts]
+            + [metrics.get(key, '') for key in VLLM_BENCH_HEADERS[5:]],
+            vllm_bench_result_file_name, headers=VLLM_BENCH_HEADERS,
+            input_len=input_len, output_len=output_len, context_suffix=context_suffix,
+        )
+        write_to_csv(
+            [dataset, input_len, output_len, concurrency, num_prompts, ttft, tpot,
+             int(meet_requirements(ttft, tpot, ttft_max, tpot_max))],
+            sweep_results_file_name, headers=SWEEP_HEADERS,
+            input_len=input_len, output_len=output_len, context_suffix=context_suffix,
+        )
+        save_perf_log_entry(
+            input_len, output_len, concurrency, num_prompts, dataset,
+            metrics, raw_output, context_suffix, cmd=cmd,
+        )
+    time.sleep(POST_TEST_SLEEP)
     return ttft, tpot, metrics
 
 

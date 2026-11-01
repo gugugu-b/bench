@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from .benchmark import meet_requirements, run_benchmark_with_retry_and_metrics
 from .config import (
+    BENCH_METADATA_HEADERS,
     POINT_METRICS_HEADERS,
     STOP_ON_BREACH,
     TTFT_LABEL,
@@ -89,7 +90,7 @@ def point_metrics_row(dataset: str, input_len: int, output_len: int, point: Poin
         # /metrics 前后快照差值(百分数);抓取失败/无该指标时为空串
         m.get('prefix_cache_hit_rate', ''),
         m.get('spec_decode_accept_rate', ''),
-    ]
+    ] + [m.get(key, '') for key in BENCH_METADATA_HEADERS]
 
 
 def run_concurrency_sweep(input_len: int, output_len: int, concurrency_list: List[int],

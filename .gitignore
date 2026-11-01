@@ -35,6 +35,7 @@ build/
 
 # 运行时产物 - 测试输出
 bench/
+/validation/
 *.csv
 *.log
 !*.py.log

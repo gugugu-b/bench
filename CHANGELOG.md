@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.4.0 - 2026-11-01
+
+- **可选 SGLang bench**：新增 `BENCH_TOOL`，默认仍为 `"vllm"`；SGLang 使用独立的
+  Python、模块入口与请求协议配置，调度、外部预热、固定并发扫描和达标判定共用原流程。
+- **双工具数据集映射**：现有 `random` / `prefix_repetition` 用例在 SGLang 下分别转换为
+  `random-ids` / `generated-shared-prefix`，也接受两种 SGLang 原生名称。
+  显式设置固定采样长度与内部预热请求数 `0`，默认不清空缓存；GSP 前缀组数沿用
+  `num_prefixes`（默认 `1`），实际请求总数保持原约定，无法整除时给出配置错误。
+- **可选自动选择**：`AUTO_SELECT_BENCH=False` 默认关闭；开启后在运行开始前识别一次
+  服务端并选择同名压测工具。识别与性能指标抓取开关独立，失败或证据冲突时告警并回退
+  手工配置的工具。
+- **bench 日志接受率优先**：直接打印的 `Acceptance rate (%)` 优先；SGLang 服务端与
+  SGLang bench 组合支持从 `Accept length:` 按投机参数换算百分数，参数优先来自
+  `/server_info`，手工配置兜底。EAGLE / steps=3 / topk=1 / draft tokens=4 时，
+  长度 `2.74` 换算约 `58%`；无可用日志值时再回退现有 `/metrics` 计算。
+  换算沿用日志原本统计范围，不保证累计接受长度只覆盖当前并发点。
+- **统一结果与追溯信息**：兼容 SGLang 的 E2E Latency，避免混入准备阶段、Peak 或
+  retokenized 指标。保留原有 CSV 列顺序并追加工具、服务端、实际数据集和接受率来源；
+  SGLang 全量指标文件使用 `sglang_bench_result`，perf_log 目录追加 `_sglang`。
+- **保留历史运行结果**：`import_all_perf.csv` 改为跨次运行追加，首次创建或空文件时写一次表头。
+  兼容与当前表头前缀一致的旧版 CSV，为历史行补齐新增空列；未知或重排等不兼容表头会
+  报错并保留原文件，不追加数据。
+  perf_log 改为 `bench/perf_log/<SCRIPT_START_STAMP>/<模型名>_<dataset>{前缀后缀}{_sglang}/`
+  分运行归档，保留固定日志文件名，运行间不覆盖。
+- **微秒级运行时间戳**：`SCRIPT_START_STAMP` 格式改为 `YYYYMMDD_HHMMSS_ffffff`，
+  `bench/log/`、perf_log 运行目录、`best_metrics` 与 `summary` 文件名共用该时间戳，
+  避免同秒启动时产物路径碰撞。
+- **发布验证**：52 项离线测试通过；SGLang bench 实机验证 8 个场景、11 个并发点通过，
+  另 2 个 vLLM bench 兼容场景使用隔离 benchmark 启动器验证通过。验证环境原有 vLLM
+  全局 CLI 存在 OpenAI `NamespaceTool` 依赖导入错误，未修改全局依赖；默认流程仍要求
+  `vllm bench serve` 可用。实机输入 128、输出 32、并发 1 / 2，仅验证功能流程。
+
 ## v1.3.4
 
 - 修复：SGLang 后端 `spec_decode_accept_rate` 失真——实测记录 100% / 59.77%，
