@@ -1,13 +1,18 @@
 """离线验证工具选择、预热、接受率回退和最终文件之间的完整链路。"""
 
 import csv
+import os
 from pathlib import Path
+import stat
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
 from bench_core import benchmark, config, runner
-from bench_core.bench_tools import BenchRuntime
+from bench_core.bench_tools import VLLM_BENCH_DIRECT_SCRIPT, BenchRuntime
 from bench_core.metrics import parse_prometheus_text
 
 
@@ -225,6 +230,261 @@ class BenchmarkIntegrationTests(unittest.TestCase):
         self.assertEqual(config.resolve_warmup_rounds({'prefix_repetition': 4},
                                                     'generated-shared-prefix'), 4)
         self.assertEqual(config.resolve_warmup_rounds({'random-ids': 0}, 'random'), 0)
+
+    def test_vllm_cli_namespace_tool_import_error_falls_back_and_persists_across_run(self):
+        cases = [{
+            'input_len': 16, 'output_len': 8, 'concurrency': [1, 2],
+            'num_prompts_ratio': 2, 'datasets': ['random'], 'warmup_rounds': 2,
+        }]
+        commands = []
+        namespace_traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/local/bin/vllm", line 5, in <module>\n'
+            "    from vllm.entrypoints.cli.main import main\n"
+            "ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses' "
+            "(/usr/local/lib/python3.10/dist-packages/openai/types/responses/__init__.py)\n"
+        )
+
+        def execute(cmd):
+            commands.append(cmd)
+            if cmd[:3] == ['vllm', 'bench', 'serve']:
+                raise subprocess.CalledProcessError(1, cmd, output=namespace_traceback)
+            return bench_output(cmd, 'Acceptance rate (%): 71.5')
+
+        with patch.object(runner, 'IO', cases), \
+             patch.object(config, 'VLLM_BENCH_MODE', 'auto'), \
+             patch.object(config, 'VLLM_PYTHON', sys.executable), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             patch.object(benchmark, 'resolve_bench_runtime', return_value=BenchRuntime('vllm')), \
+             patch.object(benchmark, '_run_subprocess', side_effect=execute), \
+             self.assertLogs(level='WARNING') as captured:
+            runner.run_test_cases()
+
+        self.assertTrue(any('NamespaceTool' in msg and '回退直调' in msg for msg in captured.output))
+        # 1 次失败的 CLI 启动 + 2 个并发点 × (2 轮预热 + 1 轮正式) = 7 次调用;后续不再试 CLI。
+        self.assertEqual(len(commands), 7)
+        self.assertEqual(commands[0][:3], ['vllm', 'bench', 'serve'])
+        for cmd in commands[1:]:
+            self.assertEqual(cmd[:3], [sys.executable, '-c', VLLM_BENCH_DIRECT_SCRIPT])
+        self.assertEqual(commands[1][3:], commands[0][3:])
+        self.assertEqual(benchmark.get_bench_runtime().vllm_launcher, 'direct')
+        self.assertEqual(benchmark._bench_err_num, 0)
+
+        rows = self.read_csv(self.root / 'bench' / 'import_all_perf.csv')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r['concurrency'] for r in rows], ['1', '2'])
+        logs = list((self.root / 'bench' / 'perf_log').rglob('*.log'))
+        self.assertEqual(len(logs), 2)
+        for log in logs:
+            text = log.read_text(encoding='utf-8')
+            self.assertIn('vllm.benchmarks.serve', text)
+            self.assertNotIn('Command: vllm bench serve', text)
+            self.assertNotIn('_executed_cmd', text)
+            self.assertNotIn('_raw_output', text)
+
+    def test_vllm_cli_fallback_during_formal_run_records_direct_command_in_perf_log(self):
+        cases = [{
+            'input_len': 16, 'output_len': 8, 'concurrency': [1],
+            'datasets': ['random'],
+        }]
+        commands = []
+
+        def execute(cmd):
+            commands.append(cmd)
+            if cmd[:3] == ['vllm', 'bench', 'serve']:
+                raise subprocess.CalledProcessError(
+                    1, cmd,
+                    output="ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'\n",
+                )
+            return bench_output(cmd, '')
+
+        with patch.object(runner, 'IO', cases), \
+             patch.object(config, 'VLLM_BENCH_MODE', 'auto'), \
+             patch.object(config, 'VLLM_PYTHON', sys.executable), \
+             patch.object(benchmark, 'ENABLE_DOUBLE_RUN', False), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             patch.object(benchmark, 'resolve_bench_runtime', return_value=BenchRuntime('vllm')), \
+             patch.object(benchmark, '_run_subprocess', side_effect=execute), \
+             self.assertLogs(level='WARNING'):
+            runner.run_test_cases()
+
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][:3], ['vllm', 'bench', 'serve'])
+        self.assertEqual(commands[1][:3], [sys.executable, '-c', VLLM_BENCH_DIRECT_SCRIPT])
+        log = next((self.root / 'bench' / 'perf_log').rglob('*.log')).read_text(encoding='utf-8')
+        self.assertIn('Command:', log)
+        self.assertIn('vllm.benchmarks.serve', log)
+        self.assertNotIn('Command: vllm bench serve', log)
+        self.assertNotIn('_executed_cmd', log)
+
+    def test_vllm_bench_mode_cli_disables_fallback(self):
+        cases = [{'input_len': 16, 'output_len': 8, 'concurrency': [1], 'datasets': ['random']}]
+        commands = []
+
+        def execute(cmd):
+            commands.append(cmd)
+            raise subprocess.CalledProcessError(
+                1, cmd,
+                output="ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'\n",
+            )
+
+        with patch.object(runner, 'IO', cases), \
+             patch.object(config, 'VLLM_BENCH_MODE', 'cli'), \
+             patch.object(benchmark, 'ENABLE_DOUBLE_RUN', False), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             patch.object(benchmark, 'RETRY_SLEEP', 0), \
+             patch.object(benchmark, 'resolve_bench_runtime', return_value=BenchRuntime('vllm')), \
+             patch.object(benchmark, '_run_subprocess', side_effect=execute), \
+             self.assertLogs(level='WARNING'):
+            runner.run_test_cases()
+
+        self.assertEqual(len(commands), benchmark.MAX_RETRIES)
+        self.assertTrue(all(cmd[:3] == ['vllm', 'bench', 'serve'] for cmd in commands))
+        self.assertEqual(benchmark.get_bench_runtime().vllm_launcher, 'cli')
+
+    def test_vllm_bench_mode_direct_skips_cli_from_start(self):
+        cases = [{'input_len': 16, 'output_len': 8, 'concurrency': [1], 'datasets': ['random']}]
+        commands = []
+
+        def execute(cmd):
+            commands.append(cmd)
+            return bench_output(cmd, '')
+
+        with patch.object(runner, 'IO', cases), \
+             patch.object(config, 'BENCH_TOOL', 'vllm'), \
+             patch.object(config, 'AUTO_SELECT_BENCH', False), \
+             patch.object(config, 'VLLM_BENCH_MODE', 'direct'), \
+             patch.object(config, 'VLLM_PYTHON', sys.executable), \
+             patch.object(benchmark, 'ENABLE_DOUBLE_RUN', False), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             patch.object(benchmark, '_run_subprocess', side_effect=execute):
+            runner.run_test_cases()
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][:3], [sys.executable, '-c', VLLM_BENCH_DIRECT_SCRIPT])
+
+    def test_vllm_cli_fallback_failure_does_not_loop_and_counts_error(self):
+        commands = []
+
+        def execute(cmd):
+            commands.append(cmd)
+            if cmd[:3] == ['vllm', 'bench', 'serve']:
+                raise FileNotFoundError(2, 'No such file or directory', 'vllm')
+            raise subprocess.CalledProcessError(
+                1, cmd, output="ModuleNotFoundError: No module named 'vllm'\n",
+            )
+
+        benchmark.initialize_bench_runtime(BenchRuntime('vllm'))
+        with patch.object(config, 'VLLM_BENCH_MODE', 'auto'), \
+             patch.object(config, 'VLLM_PYTHON', sys.executable), \
+             patch.object(benchmark, 'ENABLE_DOUBLE_RUN', False), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             patch.object(benchmark, 'RETRY_SLEEP', 0), \
+             patch.object(benchmark, '_run_subprocess', side_effect=execute), \
+             self.assertLogs(level='WARNING'):
+            ttft, tpot, metrics = benchmark.run_benchmark_with_retry_and_metrics(
+                16, 8, 1, 3000, 100, 'result.csv', 'sweep.csv', 'random', 2, 0.9, 1,
+                warmup_rounds=0, retries=2,
+            )
+
+        self.assertEqual((ttft, tpot, metrics), (-1, -1, {}))
+        # 第 1 次尝试: CLI(缺失) -> 回退直调(失败); 第 2 次重试: 直接走直调(失败),不再重复调 CLI。
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][:3], ['vllm', 'bench', 'serve'])
+        self.assertEqual(commands[1][:3], [sys.executable, '-c', VLLM_BENCH_DIRECT_SCRIPT])
+        self.assertEqual(commands[2][:3], [sys.executable, '-c', VLLM_BENCH_DIRECT_SCRIPT])
+
+    def test_real_subprocess_vllm_cli_import_error_falls_back_to_direct_module(self):
+        """端到端真实子进程验证: 模拟海光镜像 vllm CLI NamespaceTool 导入报错并成功回退直调。"""
+        bin_dir = self.root / 'fake_bin'
+        site_dir = self.root / 'fake_site'
+        cli_counter = self.root / 'cli_calls.txt'
+        bin_dir.mkdir()
+        (site_dir / 'vllm' / 'benchmarks').mkdir(parents=True)
+
+        fake_vllm = bin_dir / 'vllm'
+        fake_vllm.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import pathlib, sys
+            p = pathlib.Path({str(cli_counter)!r})
+            p.write_text((p.read_text() if p.exists() else '') + '1\\n')
+            sys.stderr.write(
+                "Traceback (most recent call last):\\n"
+                '  File "/usr/local/bin/vllm", line 5, in <module>\\n'
+                "    from vllm.entrypoints.cli.main import main\\n"
+                "ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses' "
+                "(/usr/local/lib/python3.10/dist-packages/openai/types/responses/__init__.py)\\n"
+            )
+            sys.exit(1)
+        """), encoding='utf-8')
+        fake_vllm.chmod(fake_vllm.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        (site_dir / 'vllm' / '__init__.py').write_text('', encoding='utf-8')
+        (site_dir / 'vllm' / 'benchmarks' / '__init__.py').write_text('', encoding='utf-8')
+        (site_dir / 'vllm' / 'benchmarks' / 'serve.py').write_text(textwrap.dedent("""\
+            def add_cli_args(parser):
+                parser.add_argument('--host', required=True)
+                parser.add_argument('--port', type=int, required=True)
+                parser.add_argument('--backend', required=True)
+                parser.add_argument('--served-model-name', required=True)
+                parser.add_argument('--model', required=True)
+                parser.add_argument('--num-prompts', type=int, required=True)
+                parser.add_argument('--max-concurrency', type=int, required=True)
+                parser.add_argument('--temperature', type=float, default=0.0)
+                parser.add_argument('--percentile-metrics', default='ttft,tpot,itl,e2el')
+                parser.add_argument('--dataset-name', required=True)
+                parser.add_argument('--random-input-len', type=int)
+                parser.add_argument('--random-output-len', type=int)
+                parser.add_argument('--ignore-eos', action='store_true')
+
+            def main(args):
+                print('============ Serving Benchmark Result ============')
+                print(f'Successful requests: {args.num_prompts}')
+                print('Benchmark duration (s): 1.5')
+                print(f'Total input tokens: {args.num_prompts * args.random_input_len}')
+                print(f'Total generated tokens: {args.num_prompts * args.random_output_len}')
+                print('Request throughput (req/s): 2.0')
+                print('Output token throughput (tok/s): 20.0')
+                print('Total token throughput (tok/s): 60.0')
+                print(f'Mean TTFT (ms): {args.max_concurrency * 12.0}')
+                print('Median TTFT (ms): 12.0')
+                print('P99 TTFT (ms): 15.0')
+                print('Mean TPOT (ms): 5.0')
+                print('Median TPOT (ms): 5.0')
+                print('P99 TPOT (ms): 6.0')
+                print('Mean ITL (ms): 5.0')
+                print('Median ITL (ms): 5.0')
+                print('P99 ITL (ms): 6.0')
+                print('Mean E2EL (ms): 120.0')
+        """), encoding='utf-8')
+
+        cases = [{
+            'input_len': 16, 'output_len': 8, 'concurrency': [1, 2],
+            'num_prompts_ratio': 2, 'datasets': ['random'],
+        }]
+        env_patch = {
+            'PATH': f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            'PYTHONPATH': f"{site_dir}{os.pathsep}{os.environ.get('PYTHONPATH', '')}".rstrip(os.pathsep),
+        }
+        with patch.dict(os.environ, env_patch), \
+             patch.object(runner, 'IO', cases), \
+             patch.object(config, 'BENCH_TOOL', 'vllm'), \
+             patch.object(config, 'AUTO_SELECT_BENCH', False), \
+             patch.object(config, 'VLLM_BENCH_MODE', 'auto'), \
+             patch.object(config, 'VLLM_PYTHON', sys.executable), \
+             patch.object(benchmark, 'ENABLE_DOUBLE_RUN', False), \
+             patch.object(benchmark, 'ENABLE_METRICS_SCRAPE', False), \
+             self.assertLogs(level='WARNING') as captured:
+            runner.run_test_cases()
+
+        self.assertTrue(any('NamespaceTool' in msg for msg in captured.output))
+        # 损坏的 vllm CLI 只会被触发 1 次,第 2 个并发点直接走直调模块。
+        self.assertEqual(len(cli_counter.read_text(encoding='utf-8').splitlines()), 1)
+        rows = self.read_csv(self.root / 'bench' / 'import_all_perf.csv')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r['concurrency'] for r in rows], ['1', '2'])
+        self.assertEqual([r['mean_ttft'] for r in rows], ['12.0', '24.0'])
+        self.assertEqual([r['mean_e2el'] for r in rows], ['120.0', '120.0'])
 
 
 if __name__ == '__main__':

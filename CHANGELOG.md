@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.4.1 - 2026-11-26
+
+- **vLLM bench CLI 启动失败自动回退直调模块**：解决海光 SGLang 等镜像中全局 `vllm` CLI
+  因 `openai` 版本不匹配触发 `ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'`
+  （或 `ModuleNotFoundError`、`vllm.entrypoints` 启动阶段异常、`vllm` 命令不在 `PATH`）导致压测中断的问题。
+  - 优先执行原 `vllm bench serve`；检测到上述 CLI 启动故障时打印告警并自动改用
+    `VLLM_PYTHON -c 'import argparse; from vllm.benchmarks.serve import add_cli_args, main; p = argparse.ArgumentParser(); add_cli_args(p); main(p.parse_args())'`
+    携带原全部参数执行，绕过损坏的 `vllm.entrypoints` CLI 入口，不消耗失败重试次数。
+  - **运行内持久生效**：首次回退触发后将当前 `BenchRuntime.vllm_launcher` 切换为 `"direct"`，
+    同次运行后续的预热轮、正式轮和其余并发点直接沿用直调模式，不再重复触发失败的 CLI；
+    若回退后直调本身仍失败，则按正常失败计数与重试逻辑处理，不会死循环。
+  - **可配置启动模式**：`config.py` 新增 `VLLM_BENCH_MODE`（默认 `"auto"`，可选 `"auto"` /
+    `"cli"` / `"direct"`）与 `VLLM_PYTHON`（默认 `sys.executable`，可指定另一环境 Python 路径）。
+  - **日志追溯一致**：正式轮触发回退时，`perf_log` 的 `Command:` 记录实际成功执行的直调命令；
+    非启动阶段错误（如服务端连接失败、非法 CLI 参数、超时等）不会误触发回退；所有 CSV 表头不变。
+- **验证**：63 项离线测试全部通过（新增 11 项单测与集成测试，含真实子进程模拟
+  `NamespaceTool` `ImportError` 自动回退的端到端验证）。
+
 ## v1.4.0 - 2026-11-01
 
 - **可选 SGLang bench**：新增 `BENCH_TOOL`，默认仍为 `"vllm"`；SGLang 使用独立的

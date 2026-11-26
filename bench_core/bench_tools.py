@@ -5,6 +5,8 @@ import logging
 import math
 import os
 import re
+import subprocess
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -19,7 +21,23 @@ class BenchRuntime:
     server_engine: str = ""
     selection: str = "manual"
     server_info: dict = field(default_factory=dict)
+    vllm_launcher: str = "cli"
 
+
+VLLM_BENCH_CLI_PREFIX = ("vllm", "bench", "serve")
+VLLM_BENCH_DIRECT_SCRIPT = (
+    "import argparse; "
+    "from vllm.benchmarks.serve import add_cli_args, main; "
+    "p = argparse.ArgumentParser(); "
+    "add_cli_args(p); "
+    "main(p.parse_args())"
+)
+_VLLM_BENCH_MODES = ("auto", "cli", "direct")
+_VLLM_LAUNCHERS = ("cli", "direct")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_VLLM_IMPORT_ERROR_RE = re.compile(r"^\s*(?:ImportError|ModuleNotFoundError)\s*:", re.MULTILINE)
+_VLLM_ENTRYPOINTS_FRAME_RE = re.compile(r"vllm[/\\]entrypoints[/\\]")
+_VLLM_BENCHMARKS_FRAME_RE = re.compile(r"vllm[/\\]benchmarks[/\\]")
 
 _DATASET_FAMILIES = {
     "random": "random",
@@ -35,6 +53,93 @@ def _tool_name(tool: str) -> str:
     if name not in ("vllm", "sglang"):
         raise ValueError(f"不支持的 BENCH_TOOL: {tool!r}; 可选 vllm / sglang")
     return name
+
+
+def _vllm_bench_mode(mode: str) -> str:
+    name = str(mode).strip().lower()
+    if name not in _VLLM_BENCH_MODES:
+        raise ValueError(f"不支持的 VLLM_BENCH_MODE: {mode!r}; 可选 auto / cli / direct")
+    return name
+
+
+def _vllm_launcher_name(launcher: str) -> str:
+    name = str(launcher).strip().lower()
+    if name not in _VLLM_LAUNCHERS:
+        raise ValueError(f"不支持的 vLLM 启动方式: {launcher!r}; 可选 cli / direct")
+    return name
+
+
+def vllm_bench_prefix(launcher: str = "cli") -> list:
+    """返回 vLLM bench 的命令前缀(CLI 或直调 vllm.benchmarks.serve)。"""
+    selected = _vllm_launcher_name(launcher)
+    if selected == "cli":
+        return list(VLLM_BENCH_CLI_PREFIX)
+    python_exec = str(config.VLLM_PYTHON or "").strip() or sys.executable
+    return [python_exec, "-c", VLLM_BENCH_DIRECT_SCRIPT]
+
+
+def is_vllm_cli_command(cmd: list) -> bool:
+    """判断命令是否通过 vllm bench serve CLI 启动。"""
+    return len(cmd) >= len(VLLM_BENCH_CLI_PREFIX) and tuple(cmd[:3]) == VLLM_BENCH_CLI_PREFIX
+
+
+def to_vllm_direct_command(cmd: list) -> list:
+    """把 vllm bench serve 命令替换为直调 vllm.benchmarks.serve,保留全部参数。"""
+    if not is_vllm_cli_command(cmd):
+        raise ValueError(f"不是 vllm bench serve CLI 命令: {cmd[:3]!r}")
+    return vllm_bench_prefix("direct") + list(cmd[len(VLLM_BENCH_CLI_PREFIX):])
+
+
+def _error_output_text(error: Exception) -> str:
+    output = getattr(error, "output", None)
+    if not output:
+        output = getattr(error, "stderr", None) or ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    return _ANSI_ESCAPE_RE.sub("", str(output))
+
+
+def should_fallback_vllm_cli(error: Exception) -> bool:
+    """判断失败是否属于 vLLM CLI 启动/导入故障,适合回退直调 vllm.benchmarks.serve。"""
+    if isinstance(error, FileNotFoundError):
+        return True
+    if not isinstance(error, subprocess.CalledProcessError):
+        return False
+    clean = _error_output_text(error)
+    if "Serving Benchmark Result" in clean:
+        return False
+    if _VLLM_IMPORT_ERROR_RE.search(clean):
+        return True
+    return (
+        "Traceback (most recent call last):" in clean
+        and bool(_VLLM_ENTRYPOINTS_FRAME_RE.search(clean))
+        and not bool(_VLLM_BENCHMARKS_FRAME_RE.search(clean))
+    )
+
+
+def can_fallback_vllm_cli(runtime: BenchRuntime, cmd: list, error: Exception) -> bool:
+    """综合当前运行时、配置开关与异常内容,决定是否自动回退到直调模式。"""
+    return (
+        runtime.tool == "vllm"
+        and runtime.vllm_launcher == "cli"
+        and _vllm_bench_mode(config.VLLM_BENCH_MODE) == "auto"
+        and is_vllm_cli_command(cmd)
+        and should_fallback_vllm_cli(error)
+    )
+
+
+def summarize_cli_error(error: Exception) -> str:
+    """提取一行 CLI 启动失败摘要,便于在回退告警日志中定位原因。"""
+    if isinstance(error, FileNotFoundError):
+        return str(error)
+    clean = _error_output_text(error).strip()
+    if clean:
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if _VLLM_IMPORT_ERROR_RE.match(line):
+                return line
+        return lines[-1]
+    return str(error)
 
 
 def actual_dataset(dataset: str, tool: str) -> str:
@@ -98,6 +203,13 @@ def _load_sglang_server_info() -> dict:
 def resolve_bench_runtime() -> BenchRuntime:
     """启动时选择工具;未知或冲突时告警并回退手工 BENCH_TOOL。"""
     manual_tool = _tool_name(config.BENCH_TOOL)
+    vllm_mode = _vllm_bench_mode(config.VLLM_BENCH_MODE)
+    initial_vllm_launcher = "direct" if vllm_mode == "direct" else "cli"
+
+    def _runtime(tool: str, server_engine: str, selection: str, info: dict) -> BenchRuntime:
+        launcher = initial_vllm_launcher if tool == "vllm" else "cli"
+        return BenchRuntime(tool, server_engine, selection, info, launcher)
+
     # SGLang 原生请求协议本身已明确指定目标类型。即使信息接口/metrics 不开放,
     # 仍可用 bench Accept length 和手工投机参数换算,不影响默认 vLLM 的识别行为。
     manual_engine = (
@@ -105,7 +217,7 @@ def resolve_bench_runtime() -> BenchRuntime:
     )
     if not config.AUTO_SELECT_BENCH:
         info = _load_sglang_server_info() if manual_tool == "sglang" else {}
-        return BenchRuntime(manual_tool, "sglang" if info else manual_engine, "manual", info)
+        return _runtime(manual_tool, "sglang" if info else manual_engine, "manual", info)
 
     info = _load_sglang_server_info()
     metrics_text = _request_text(config.METRICS_SCRAPE_PATH) or ""
@@ -118,11 +230,11 @@ def resolve_bench_runtime() -> BenchRuntime:
     if len(candidates) == 1:
         engine = candidates.pop()
         logging.info(f"自动识别服务端: {engine}; 选择 {engine} bench")
-        return BenchRuntime(engine, engine, "auto", info)
+        return _runtime(engine, engine, "auto", info)
 
     reason = "服务端特征冲突" if candidates else "没有取得可识别的服务端特征"
     logging.warning(f"{reason}; 回退手工配置 BENCH_TOOL={manual_tool}")
-    return BenchRuntime(manual_tool, manual_engine, "fallback", info)
+    return _runtime(manual_tool, manual_engine, "fallback", info)
 
 
 def build_bench_command(runtime: BenchRuntime, input_len: int, output_len: int,
@@ -142,8 +254,7 @@ def build_bench_command(runtime: BenchRuntime, input_len: int, output_len: int,
         suffix_len = math.ceil(input_len * (1 - pc_ratio))
 
     if tool == "vllm":
-        command = [
-            "vllm", "bench", "serve",
+        command = vllm_bench_prefix(runtime.vllm_launcher) + [
             "--host", config.HOST,
             "--port", str(config.PORT),
             "--backend", config.BACKEND,

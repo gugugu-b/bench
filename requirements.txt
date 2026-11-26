@@ -1,6 +1,6 @@
 # 本项目仅使用 Python 标准库(>=3.9),无需安装第三方包。
 # 外部压测工具由测试环境提供,不在本仓库安装:
-#   - 默认:vllm bench serve CLI。
+#   - 默认:vllm bench serve CLI(CLI 启动导入报错时默认自动回退 VLLM_PYTHON 直调 vllm.benchmarks.serve)。
 #   - 可选:SGLang benchmark 模块及其依赖(使用 SGLANG_PYTHON 指定的环境)。
 #
 # 标准库使用清单:

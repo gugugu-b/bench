@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Tuple
 
+from . import config
 from .config import (
     BENCH_MAX_ERRORS,
     ENABLE_DOUBLE_RUN,
@@ -32,7 +33,15 @@ from .config import (
     compute_num_prompts,
     prefix_context_tag,
 )
-from .bench_tools import BenchRuntime, actual_dataset, build_bench_command, resolve_bench_runtime
+from .bench_tools import (
+    BenchRuntime,
+    actual_dataset,
+    build_bench_command,
+    can_fallback_vllm_cli,
+    resolve_bench_runtime,
+    summarize_cli_error,
+    to_vllm_direct_command,
+)
 from .csv_io import write_to_csv
 from .metrics import (
     _detect_backend,
@@ -63,9 +72,15 @@ def initialize_bench_runtime(runtime: BenchRuntime = None) -> BenchRuntime:
     global _bench_runtime, _metrics_scrape_warned
     _bench_runtime = runtime if runtime is not None else resolve_bench_runtime()
     _metrics_scrape_warned = False
+    launcher_info = (
+        f", vLLM启动方式={_bench_runtime.vllm_launcher} (配置={config.VLLM_BENCH_MODE})"
+        if _bench_runtime.tool == "vllm"
+        else ""
+    )
     logging.info(
-        "压测工具=%s, 服务端=%s, 选择方式=%s",
+        "压测工具=%s, 服务端=%s, 选择方式=%s%s",
         _bench_runtime.tool, _bench_runtime.server_engine or "未知", _bench_runtime.selection,
+        launcher_info,
     )
     return _bench_runtime
 
@@ -191,6 +206,28 @@ def _run_subprocess(cmd):
     return result.stdout
 
 
+def _run_bench_command_with_fallback(cmd):
+    """执行压测命令;vLLM CLI 因导入错误或缺失启动失败时,按配置回退直调 vllm.benchmarks.serve。
+
+    返回 (stdout, actual_cmd)。回退触发后固定到当前 BenchRuntime,本次运行后续轮次直接沿用。
+    """
+    try:
+        return _run_subprocess(cmd), cmd
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        runtime = get_bench_runtime()
+        if not can_fallback_vllm_cli(runtime, cmd, e):
+            raise
+        reason = summarize_cli_error(e)
+        fallback_cmd = to_vllm_direct_command(cmd)
+        runtime.vllm_launcher = "direct"
+        logging.warning(
+            "vllm bench serve CLI 启动失败(%s); 自动回退直调 vllm.benchmarks.serve "
+            "(本次运行后续测试点均沿用直调模式)",
+            reason,
+        )
+        return _run_subprocess(fallback_cmd), fallback_cmd
+
+
 def meet_requirements(ttft: float, tpot: float, ttft_max: float, tpot_max: float) -> bool:
     """TTFT 与 TPOT 是否都在阈值内(按原始阈值判定,不加安全余量)。"""
     if ttft == -1 or tpot == -1:
@@ -209,7 +246,7 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         f"np={num_prompts} ds={dataset} ..."
     )
     try:
-        output = _run_subprocess(cmd)
+        output, executed_cmd = _run_bench_command_with_fallback(cmd)
         logging.debug(f"{stage}测试原始输出:\n{output}")
         m = _extract_all_metrics(output)
 
@@ -221,8 +258,9 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         tpot = select_tpot(m, TPOT_LABEL)
 
         if not is_warmup:
-            # 正式轮在补全 metrics 回退和来源后统一落盘;原始输出不暴露给结果对象。
+            # 正式轮在补全 metrics 回退和来源后统一落盘;内部字段不暴露给结果对象。
             m['_raw_output'] = output
+            m['_executed_cmd'] = executed_cmd
             passed = meet_requirements(ttft, tpot, ttft_max, tpot_max)
             logging.info(
                 f"  ┗━ 并发 {concurrency} (np={num_prompts}, {dataset}): "
@@ -239,9 +277,12 @@ def _execute_test(cmd, input_len, output_len, concurrency, num_prompts, dataset,
         if is_warmup:
             time.sleep(POST_TEST_SLEEP)
         return ttft, tpot, m
-    except subprocess.CalledProcessError as e:
-        # stderr 已合并进 stdout,这里只能从 output 取
-        detail = e.output if isinstance(e.output, str) and e.output else e.stderr
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # stderr 已合并进 stdout,CalledProcessError 优先从 output 取
+        if isinstance(e, subprocess.CalledProcessError):
+            detail = e.output if isinstance(e.output, str) and e.output else e.stderr
+        else:
+            detail = str(e)
         logging.error(f"  ┗━ 并发 {concurrency} 运行出错: {detail}")
         _bench_err_num += 1
         if _bench_err_num < BENCH_MAX_ERRORS:
@@ -268,6 +309,7 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
         spec_snapshots = _stop_spec_rate_sampler(sampler) if sampler else None
     if metrics and ttft != -1 and tpot != -1:
         raw_output = metrics.pop('_raw_output', '')
+        executed_cmd = metrics.pop('_executed_cmd', cmd)
         after = _scrape_metrics_snapshot()
         cache_rate, spec_rate = compute_metrics_rates(
             before, after, spec_snapshots,
@@ -306,7 +348,7 @@ def _formal_test_with_scrape(cmd, input_len, output_len, concurrency, num_prompt
         )
         save_perf_log_entry(
             input_len, output_len, concurrency, num_prompts, dataset,
-            metrics, raw_output, context_suffix, cmd=cmd,
+            metrics, raw_output, context_suffix, cmd=executed_cmd,
         )
     time.sleep(POST_TEST_SLEEP)
     return ttft, tpot, metrics
@@ -321,13 +363,14 @@ def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int
     """运行 benchmark,提取指标。ENABLE_DOUBLE_RUN 时先用相同命令预热 warmup_rounds 轮,再正式测试。"""
     global _bench_err_num
     num_prompts = compute_num_prompts(concurrency, num_prompts_ratio)
-    cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts,
-                           pc_ratio, num_prefixes)
     context_suffix = prefix_context_tag(dataset, pc_ratio, num_prefixes)
 
     try:
         if ENABLE_DOUBLE_RUN:
             for round_idx in range(1, warmup_rounds + 1):
+                # 每轮重新构造命令,保证首次 CLI 回退到直调模式后后续预热与正式轮直接复用。
+                cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts,
+                                       pc_ratio, num_prefixes)
                 logging.info(
                     f"开始预热测试 {round_idx}/{warmup_rounds} - 输入长度: {input_len}, "
                     f"输出长度: {output_len}, 并发数: {concurrency}, "
@@ -346,12 +389,16 @@ def run_benchmark_with_metrics(input_len: int, output_len: int, concurrency: int
                 f"开始正式测试 - 输入长度: {input_len}, 输出长度: {output_len}, "
                 f"并发数: {concurrency}, 请求数: {num_prompts}, 数据集: {dataset}"
             )
+            cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts,
+                                   pc_ratio, num_prefixes)
             return _formal_test_with_scrape(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,
                 ttft_max, tpot_max, context_suffix=context_suffix,
             )
         else:
+            cmd = _build_bench_cmd(input_len, output_len, concurrency, dataset, num_prompts,
+                                   pc_ratio, num_prefixes)
             return _formal_test_with_scrape(
                 cmd, input_len, output_len, concurrency, num_prompts, dataset,
                 vllm_bench_result_file_name, sweep_results_file_name,

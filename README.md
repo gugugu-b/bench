@@ -4,7 +4,7 @@
 > 在 TTFT / TPOT 阈值内找出**最大达标并发**。
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/Version-v1.4.0-blue)](CHANGELOG.md#v140---2026-11-01)
+[![Version](https://img.shields.io/badge/Version-v1.4.1-blue)](CHANGELOG.md#v141---2026-11-26)
 [![Status](https://img.shields.io/badge/Status-Active-success)](CHANGELOG.md)
 
 ---
@@ -29,7 +29,7 @@
 ### 环境要求
 
 - **Python 3.9+**（本项目的调度与解析仅用标准库，无需额外 `pip install`）
-- 默认压测环境可运行 `vllm bench serve` 子命令（参考 [vLLM 官方文档](https://docs.vllm.ai/en/latest/benchmarking/)）
+- 默认压测环境可运行 `vllm bench serve` 子命令（参考 [vLLM 官方文档](https://docs.vllm.ai/en/latest/benchmarking/)）；若镜像中 `vllm` CLI 因依赖冲突报错（例如海光 SGLang 镜像中的 `ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'`）或 `PATH` 中无 `vllm` 可执行文件，默认 `VLLM_BENCH_MODE = "auto"` 会自动回退为 `VLLM_PYTHON` 直调 `vllm.benchmarks.serve` 模块
 - 使用 SGLang bench 时，需要另行准备可运行 SGLang benchmark 模块的 Python 环境；其依赖和 Python 版本要求以安装的 SGLang 版本为准，本仓库不代为安装
 
 ### 跑起来
@@ -45,6 +45,18 @@ python run.py
 服务端引擎与压测工具分别配置。默认 `BENCH_TOOL = "vllm"`，无论被测服务是 vLLM
 还是 SGLang，均继续使用原有 vLLM bench 流程；`BACKEND` 是 vLLM bench 的请求协议参数，
 不是压测工具开关。
+
+vLLM bench 启动方式由 `VLLM_BENCH_MODE` 控制（默认 `"auto"`）：
+
+- `"auto"`（默认）：优先调用 `vllm bench serve`；当 CLI 启动阶段出现导入错误
+  （如 `ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses'`、
+  `ModuleNotFoundError`、`vllm/entrypoints` 初始化异常）或缺少 `vllm` 命令时，
+  打印告警并自动回退为使用 `VLLM_PYTHON`（默认 `sys.executable`）直调
+  `vllm.benchmarks.serve`（`add_cli_args` + `main`），不消耗重试次数；
+  触发回退后本次运行后续预热轮、正式轮和并发点均直接沿用直调模式，并在 `perf_log`
+  中记录实际执行的命令。
+- `"cli"`：强制仅使用 `vllm bench serve`，关闭自动回退。
+- `"direct"`：跳过 `vllm` CLI，直接通过 `VLLM_PYTHON` 调用 `vllm.benchmarks.serve`。
 
 手动切换 SGLang bench：
 
@@ -98,6 +110,7 @@ SGLang 内部预热固定为 `--warmup-requests 0`，预热统一由本工具的
 | `BENCH_TOOL` / `AUTO_SELECT_BENCH` | 手工选择压测工具 / 是否按服务端自动选择 | `"vllm"` / `False` |
 | `BENCH_DETECT_TIMEOUT` | 每个服务端识别请求的超时（秒），与性能指标抓取开关独立 | `3` |
 | `BACKEND` / `SGLANG_BACKEND` | 分别传给 vLLM / SGLang bench 的请求协议参数 | `"vllm"` / `"sglang"` |
+| `VLLM_BENCH_MODE` / `VLLM_PYTHON` | vLLM bench 启动方式（`auto` 优先 CLI、导入失败自动回退直调 / `cli` / `direct`）与直调回退使用的 Python | `"auto"` / `sys.executable` |
 | `SGLANG_PYTHON` / `SGLANG_BENCH_MODULE` | SGLang bench 使用的 Python 与模块入口 | `sys.executable` / `"sglang.bench_serving"` |
 | `SGLANG_SPECULATIVE_NUM_DRAFT_TOKENS` / `SGLANG_SPECULATIVE_NUM_STEPS` | `Accept length:` 换算的手工兜底参数；优先使用服务端 `/server_info` 中的投机参数 | `4` / `3` |
 | `NUM_PROMPTS_RATIO`                                   | 全局「请求数 : 并发数」比例                                                                                                                                                 | `2`                                     |
@@ -255,17 +268,24 @@ bench/
 python3 -B -m unittest discover -s tests -v
 ```
 
+v1.4.1（2026-11-26）验证结果：
+
+- **63 项离线测试通过**（在 v1.4.0 的 52 项基础上新增 11 项），覆盖 `VLLM_BENCH_MODE`
+  （`auto` / `cli` / `direct`）、`vllm bench serve` 触发 `NamespaceTool` `ImportError` /
+  缺失可执行文件自动回退直调 `vllm.benchmarks.serve`、回退状态跨轮次与跨并发点复用、
+  `perf_log` 记录实际直调命令，以及基于真实子进程的端到端回退验证。
+
 v1.4.0（2026-11-01）发布验证结果：
 
 - **52 项离线测试通过**，覆盖工具选择、数据集命令、指标解析、接受率回退和跨次结果保留。
 - **SGLang bench 实机验证 8 个场景、11 个并发点通过**；另有 **2 个 vLLM bench 兼容场景**
   通过隔离 benchmark 启动器完成验证。
 - 验证环境原有 vLLM 全局 CLI 存在 OpenAI `NamespaceTool` 依赖导入错误，兼容验证绕过了该入口；
-  项目未修改全局依赖。发布版默认流程仍要求测试环境的 `vllm bench serve` 命令本身可用。
+  项目未修改全局依赖（v1.4.1 起已将该回退能力内置为默认 `VLLM_BENCH_MODE="auto"`）。
 - 实机验证采用输入长度 128、输出长度 32、并发 1 / 2，用于检查功能流程，不能作为生产容量结论。
 
 ---
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.4.0**，发布日期 **2026-11-01**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **v1.4.1**，发布日期 **2026-11-26**。

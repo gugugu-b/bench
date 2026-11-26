@@ -1,15 +1,21 @@
 import json
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 
 from bench_core import config
 from bench_core.bench_tools import (
+    VLLM_BENCH_DIRECT_SCRIPT,
     BenchRuntime,
     actual_dataset,
     build_bench_command,
+    can_fallback_vllm_cli,
     resolve_bench_runtime,
+    should_fallback_vllm_cli,
+    summarize_cli_error,
+    to_vllm_direct_command,
 )
 from bench_core import bench_tools
 
@@ -18,7 +24,8 @@ class BenchToolsTest(unittest.TestCase):
     def setUp(self):
         overrides = {
             "BENCH_TOOL": "vllm", "AUTO_SELECT_BENCH": False,
-            "BENCH_DETECT_TIMEOUT": 3, "SGLANG_PYTHON": sys.executable,
+            "BENCH_DETECT_TIMEOUT": 3, "VLLM_PYTHON": sys.executable,
+            "VLLM_BENCH_MODE": "auto", "SGLANG_PYTHON": sys.executable,
             "SGLANG_BENCH_MODULE": "sglang.bench_serving", "SGLANG_BACKEND": "sglang",
             "HOST": "127.0.0.1", "PORT": "30000", "BACKEND": "vllm",
             "SERVED_MODEL_NAME": "served-name", "MODEL": "/model/tokenizer",
@@ -201,6 +208,126 @@ class BenchToolsTest(unittest.TestCase):
             self.assertIsNone(bench_tools._request_text("/metrics"))
         self.assertEqual(request.call_args.kwargs["timeout"], 3)
         self.assertEqual(request.call_args.args[0].full_url, "http://127.0.0.1:30000/metrics")
+
+    def test_vllm_direct_mode_builds_python_command_with_identical_flags(self):
+        for dataset in ("random", "prefix_repetition"):
+            with self.subTest(dataset=dataset):
+                cli_cmd = build_bench_command(
+                    BenchRuntime("vllm", vllm_launcher="cli"),
+                    1024, 128, 4, dataset, 12, 0.25, 1,
+                )
+                direct_cmd = build_bench_command(
+                    BenchRuntime("vllm", vllm_launcher="direct"),
+                    1024, 128, 4, dataset, 12, 0.25, 1,
+                )
+                self.assertEqual(direct_cmd[:3], [sys.executable, "-c", VLLM_BENCH_DIRECT_SCRIPT])
+                self.assertEqual(direct_cmd[3:], cli_cmd[3:])
+                self.assertEqual(to_vllm_direct_command(cli_cmd), direct_cmd)
+
+        with patch.object(config, "VLLM_PYTHON", "/opt/vllm/bin/python"):
+            custom_cmd = build_bench_command(
+                BenchRuntime("vllm", vllm_launcher="direct"),
+                1024, 128, 4, "random", 12, 0.25, 1,
+            )
+        self.assertEqual(custom_cmd[0], "/opt/vllm/bin/python")
+        with patch.object(config, "VLLM_PYTHON", ""):
+            fallback_py_cmd = build_bench_command(
+                BenchRuntime("vllm", vllm_launcher="direct"),
+                1024, 128, 4, "random", 12, 0.25, 1,
+            )
+        self.assertEqual(fallback_py_cmd[0], sys.executable)
+
+    def test_resolve_runtime_respects_vllm_bench_mode(self):
+        with patch.object(config, "VLLM_BENCH_MODE", "direct"):
+            runtime = resolve_bench_runtime()
+        self.assertEqual(runtime.tool, "vllm")
+        self.assertEqual(runtime.vllm_launcher, "direct")
+
+        with patch.object(config, "VLLM_BENCH_MODE", "direct"):
+            auto_vllm = self.auto_runtime({"/version": '{"version":"0.18.0"}'})
+        self.assertEqual(auto_vllm.tool, "vllm")
+        self.assertEqual(auto_vllm.vllm_launcher, "direct")
+
+        with patch.multiple(config, BENCH_TOOL="sglang", VLLM_BENCH_MODE="direct"), patch.object(
+            bench_tools, "_request_text", return_value=None,
+        ):
+            sglang_rt = resolve_bench_runtime()
+        self.assertEqual(sglang_rt.tool, "sglang")
+        self.assertEqual(sglang_rt.vllm_launcher, "cli")
+
+        with patch.object(config, "VLLM_BENCH_MODE", "typo"), self.assertRaises(ValueError):
+            resolve_bench_runtime()
+
+    def test_to_vllm_direct_command_rejects_non_cli_commands(self):
+        for cmd in ([sys.executable, "-m", "sglang.bench_serving"],
+                    [sys.executable, "-c", VLLM_BENCH_DIRECT_SCRIPT, "--host", "127.0.0.1"]):
+            with self.assertRaises(ValueError):
+                to_vllm_direct_command(cmd)
+
+    def test_should_fallback_vllm_cli_detects_startup_import_and_missing_binary(self):
+        cli_cmd = ["vllm", "bench", "serve", "--host", "127.0.0.1"]
+        namespace_err = subprocess.CalledProcessError(
+            1, cli_cmd, output=(
+                "Traceback (most recent call last):\n"
+                '  File "/usr/local/bin/vllm", line 5, in <module>\n'
+                "    from vllm.entrypoints.cli.main import main\n"
+                "ImportError: cannot import name 'NamespaceTool' from 'openai.types.responses' "
+                "(/usr/local/lib/python3.10/dist-packages/openai/types/responses/__init__.py)\n"
+            ),
+        )
+        module_err = subprocess.CalledProcessError(
+            1, cli_cmd, output="ModuleNotFoundError: No module named 'openai.types.responses'\n",
+        )
+        ansi_err = subprocess.CalledProcessError(
+            1, cli_cmd,
+            output="\x1b[1;35mImportError\x1b[0m: cannot import name 'NamespaceTool'\n",
+        )
+        entrypoint_attr_err = subprocess.CalledProcessError(
+            1, cli_cmd, output=(
+                "Traceback (most recent call last):\n"
+                '  File "/usr/local/lib/python3.10/dist-packages/vllm/entrypoints/openai/protocol.py", line 18, in <module>\n'
+                "AttributeError: module 'openai.types.responses' has no attribute 'NamespaceTool'\n"
+            ),
+        )
+        missing_bin = FileNotFoundError(2, "No such file or directory", "vllm")
+
+        for err in (namespace_err, module_err, ansi_err, entrypoint_attr_err, missing_bin):
+            with self.subTest(err=repr(err)):
+                self.assertTrue(should_fallback_vllm_cli(err))
+        self.assertIn("NamespaceTool", summarize_cli_error(namespace_err))
+
+        runtime_connect_err = subprocess.CalledProcessError(
+            1, cli_cmd, output=(
+                "Traceback (most recent call last):\n"
+                '  File "/usr/local/lib/python3.10/dist-packages/vllm/entrypoints/cli/benchmark/serve.py", line 35, in cmd\n'
+                '  File "/usr/local/lib/python3.10/dist-packages/vllm/benchmarks/serve.py", line 910, in main\n'
+                "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 127.0.0.1:30000\n"
+            ),
+        )
+        bad_arg_err = subprocess.CalledProcessError(
+            2, cli_cmd, output="vllm bench serve: error: unrecognized arguments: --unknown\n",
+        )
+        post_result_err = subprocess.CalledProcessError(
+            1, cli_cmd, output="============ Serving Benchmark Result ============\nImportError: cleanup\n",
+        )
+        timeout_err = subprocess.TimeoutExpired(cli_cmd, 10)
+
+        for err in (runtime_connect_err, bad_arg_err, post_result_err, timeout_err):
+            with self.subTest(err=repr(err)):
+                self.assertFalse(should_fallback_vllm_cli(err))
+
+    def test_can_fallback_vllm_cli_checks_runtime_mode_and_command(self):
+        cli_cmd = ["vllm", "bench", "serve", "--host", "127.0.0.1"]
+        direct_cmd = to_vllm_direct_command(cli_cmd)
+        err = subprocess.CalledProcessError(
+            1, cli_cmd, output="ImportError: cannot import name 'NamespaceTool'\n",
+        )
+        self.assertTrue(can_fallback_vllm_cli(BenchRuntime("vllm"), cli_cmd, err))
+        self.assertFalse(can_fallback_vllm_cli(BenchRuntime("vllm", vllm_launcher="direct"), cli_cmd, err))
+        self.assertFalse(can_fallback_vllm_cli(BenchRuntime("vllm"), direct_cmd, err))
+        self.assertFalse(can_fallback_vllm_cli(BenchRuntime("sglang"), cli_cmd, err))
+        with patch.object(config, "VLLM_BENCH_MODE", "cli"):
+            self.assertFalse(can_fallback_vllm_cli(BenchRuntime("vllm"), cli_cmd, err))
 
 
 if __name__ == "__main__":

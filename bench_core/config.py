@@ -10,7 +10,7 @@ from datetime import datetime
 # ============================================================
 # 版本号
 # ============================================================
-VERSION = "v1.4.0"
+VERSION = "v1.4.1"
 
 # ============================================================
 # 环境配置(被测服务 + perf_log 输出,切换环境改这里)
@@ -21,6 +21,8 @@ BACKEND = "vllm"                  # vLLM bench 的请求协议,不是压测工�
 BENCH_TOOL = "vllm"               # 压测工具: vllm / sglang
 AUTO_SELECT_BENCH = False          # 开启后按服务端类型选择同名工具;识别失败回退 BENCH_TOOL
 BENCH_DETECT_TIMEOUT = 3           # 单个只读识别请求的超时(秒),与指标抓取开关独立
+VLLM_PYTHON = sys.executable       # vLLM 直调回退使用的 Python,可指定另一环境的绝对路径
+VLLM_BENCH_MODE = "auto"           # vLLM 启动方式: auto(优先 CLI,导入失败回退直调) / cli / direct
 SGLANG_PYTHON = sys.executable      # SGLang 所在 Python,可指定另一环境的绝对路径
 SGLANG_BENCH_MODULE = "sglang.bench_serving"  # 也可改为 sglang.benchmark.serving
 SGLANG_BACKEND = "sglang"          # SGLang bench 的请求协议(原生 /generate)
